@@ -1,0 +1,3 @@
+awswrangler
+wandb
+bitsandbytes
