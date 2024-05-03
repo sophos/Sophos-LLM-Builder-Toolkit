@@ -10,7 +10,8 @@ from transformers import (
     BitsAndBytesConfig,
 )
 from peft import AutoPeftModelForCausalLM
-from trl import DataCollatorForCompletionOnlyLM, DPODataCollatorWithPadding
+from trl import DataCollatorForCompletionOnlyLM
+from trl.trainer.utils import DPODataCollatorWithPadding
 from trl.import_utils import is_npu_available, is_xpu_available
 
 logger = logging.getLogger(__name__)
@@ -89,8 +90,8 @@ def get_data_collator(tokenizer, model, script_args):
             response_ids = script_args.response_template.split(',')
             instruction_ids = script_args.instruction_template.split(',')
         else:
-            response_ids = tokenizer.convert_tokens_to_ids(script_args.response_template)
-            instruction_ids = tokenizer.convert_tokens_to_ids(script_args.instruction_template)
+            response_ids = tokenizer.encode(script_args.response_template, add_special_tokens=False)
+            instruction_ids = tokenizer.encode(script_args.instruction_template, add_special_tokens=False)
 
         logger.info(f"Response token ids: {response_ids}")
         logger.info(f"Instruction token ids: {instruction_ids}")
