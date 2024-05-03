@@ -80,6 +80,10 @@ def main():
     model_dir = os.environ["SM_CHANNEL_MODEL"]
 
     script_args.default_dtype = get_default_dtype(script_args)
+    if script_args.default_dtype == torch.bfloat16:
+        training_args.bf16 = True
+    if script_args.default_dtype == torch.float16:
+        training_args.fp16 = True
 
     # Load test and train datasets as a datasets.Dataset object
     train_dataset = load_from_disk(training_dir)
