@@ -85,15 +85,15 @@ def get_data_collator(tokenizer, model, script_args):
 
     # Set the data collator for the given training objective
     if script_args.task_collator == 'completion_only':
-        if isinstance(script_args.response_template, str):
+        if script_args.comma_separated_template:
+            response_ids = script_args.response_template.split(',')
+            instruction_ids = script_args.instruction_template.split(',')
+        else:
             response_ids = tokenizer.convert_tokens_to_ids(script_args.response_template)
-        else:
-            response_ids = script_args.response_template
-
-        if isinstance(script_args.instruction_template, str):
             instruction_ids = tokenizer.convert_tokens_to_ids(script_args.instruction_template)
-        else:
-            instruction_ids = script_args.instruction_template
+
+        logger.info(f"Response token ids: {response_ids}")
+        logger.info(f"Instruction token ids: {instruction_ids}")
 
         # Does dynamic padding as child of DataCollatorForLanguageModeling
         # Only response template needs to be defined!
@@ -104,15 +104,19 @@ def get_data_collator(tokenizer, model, script_args):
             ignore_index=-100,
             # Keep this value to maximize the benefits of tensor cores
             pad_to_multiple_of=8,
+            return_tensors="pt",
         )
-    elif script_args.task_collator == "generation":
+    elif script_args.task_collator == "seq2seq":
         # Does dynamic padding
         collator = DataCollatorForSeq2Seq(
             tokenizer,
             model=model,
+            padding=script_args.padding,
+            max_length=script_args.max_length,
             label_pad_token_id=-100,
             # Keep this value to maximize the benefits of tensor cores
             pad_to_multiple_of=8,
+            return_tensors="pt",
         )
     elif script_args.task_collator == "mlm":
         # Does dynamic padding
@@ -122,14 +126,17 @@ def get_data_collator(tokenizer, model, script_args):
             mlm_probability=script_args.mlm_probability,
             # Keep this value to maximize the benefits of tensor cores
             pad_to_multiple_of=8,
+            return_tensors="pt",
         )
     elif script_args.task_collator == 'rl_dynamic_padding_only':
+        # Does dynamic padding
         collator = DPODataCollatorWithPadding(
             pad_token_id=tokenizer.pad_token_id,
             label_pad_token_id=-100,
             is_encoder_decoder=False,
         )
     elif script_args.task_collator == 'dynamic_padding_only':
+        # Does dynamic padding
         collator = DataCollatorWithPadding(
             tokenizer,
             padding=script_args.padding,

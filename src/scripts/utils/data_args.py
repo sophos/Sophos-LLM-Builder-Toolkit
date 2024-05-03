@@ -116,23 +116,27 @@ class ScriptArguments:
     attn_implementation: Optional[str] = field(
         default="flash_attention_2", metadata={"help": "Can be one of eager, sdpa, or flash_attention_2"}
     )
-    response_template: Union[str, List[int]] = field(
-        default="<|start_header_id|>assistant<|end_header_id|>", metadata={"help": "Whether to compute loss on completion only"}
+    response_template: Optional[str] = field(
+        default="<|start_header_id|>assistant<|end_header_id|>",
+        metadata={"help": "The template form that indicates the start of the response"}
     )
-    instruction_template: Union[str, List[int]] = field(
-        default=None, metadata={"help": "Whether to compute loss on completion only"}
+    instruction_template: Optional[str] = field(
+        default=None, metadata={"help": "The template form that indicates the start of the instruction"}
     )
-    padding: Optional[Union[bool, str]] = field(
+    comma_separated_template: Optional[bool] = field(
+        default=False, metadata={"help": "Whether templates are list of ints separated by commas or string"}
+    )
+    padding: Union[bool, str] = field(
         default=False, metadata={"help": "Select a strategy to pad the returned sequences"}
     )
-    truncation: Optional[Union[bool, str]] = field(
+    truncation: Union[bool, str] = field(
         default=True, metadata={"help": "Activates and controls truncation"}
     )
     add_generation_prompt: Optional[bool] = field(
         default=False, metadata={"help": "Whether to end the prompt with the token(s) that indicate the start of an assistant message"}
     )    
     task_collator: Optional[str] = field(
-        default="generation", metadata={"help": "Can be one of completion_only, generation, mlm, rl_dynamic_padding_only, dynamic_padding_only"}
+        default="generation", metadata={"help": "Can be one of completion_only, seq2seq, mlm, rl_dynamic_padding_only, dynamic_padding_only"}
     )
     mlm_probability: Optional[float] = field(
         default=0.15, metadata={"help": "Probabiility that a token is masked out"}
@@ -144,10 +148,10 @@ class ScriptArguments:
         default=None, metadata={"help": "Name of function from utils.data_processing to apply in SFTTrainer()"}
     )
     model_name: Optional[str] = field(
-        default="meta-llama/Llama-2-7b-hf", metadata={"help": "the model name"}
+        default="meta-llama/Meta-Llama-3-8B", metadata={"help": "the model name"}
     )
     base_model: Optional[str] = field(
-        default="meta-llama/Llama-2-7b-hf", metadata={"help": "The model name or path used as a base"}
+        default="meta-llama/Meta-Llama-3-8B", metadata={"help": "The model name or path used as a base"}
     )
     dataset_name: Optional[str] = field(
         default="lvwerra/stack-exchange-paired", metadata={"help": "the dataset name"}
@@ -166,7 +170,7 @@ class ScriptArguments:
         default=5000, metadata={"help": "the shuffle buffer size"}
     )
     seq_length: Optional[int] = field(
-        default=1024, metadata={"help": "the sequence length"}
+        default=1024, metadata={"help": "Sequence length to use for the ConstantLengthDataset in SFTTrainer"}
     )
     num_workers: Optional[int] = field(
         default=4, metadata={"help": "the number of workers"}
@@ -188,7 +192,7 @@ class ScriptArguments:
     lora_target_modules: Optional[str] = field(
         default="q_proj,v_proj,k_proj,out_proj,fc_in,fc_out,wte", metadata={"help": "Layers to be replaced separated by commas"}
     )
-    lora_r: Optional[int] = field(default=8, metadata={"help": "the lora r parameter"})
+    lora_r: Optional[int] = field(default=0, metadata={"help": "the lora r parameter"})
 
     # bitsandbytes
     load_in_8bit: Optional[bool] = field(
