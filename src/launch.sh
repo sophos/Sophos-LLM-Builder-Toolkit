@@ -34,7 +34,7 @@ python -u launch.py \
 --eval_steps=20 \
 --warmup_ratio=0.05 \
 --warmup_steps=0 \
---deepspeed="./configs/ds_z2_fp16.json" \
+--deepspeed="./configs/ds_z3_fp16.json" \
 --gradient_checkpointing=True \
 --optim="adamw_hf" \
 --learning_rate=0.00001 \
