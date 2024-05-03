@@ -49,6 +49,7 @@ def dummy_processing_function(
         truncation: bool = True,
         padding: Union[bool, str] = False,
         add_generation_prompt: bool = False,
+        **kwargs,
 ) -> Dataset:
     """
     ...
@@ -63,8 +64,8 @@ def dummy_processing_function(
         batched=True
     )
 
-    logger.info(f"Example raw message: {dataset[int(0)]['messages']}")
-    logger.info(f"Example processed chat template: {dataset[int(0)]['chat_template']}")
+    logger.info(f"Example raw message: {dataset[0]['messages']}")
+    logger.info(f"Example processed chat template: {dataset[0]['chat_template']}")
 
     dataset = dataset.map(
         lambda x: tokenizer(

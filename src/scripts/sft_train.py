@@ -1,5 +1,6 @@
 import os
 import sys
+from dataclasses import asdict
 import importlib
 import logging
 
@@ -42,8 +43,8 @@ LOCAL_WORLD_SIZE = int(os.environ["LOCAL_WORLD_SIZE"])  # 8
 WORLD_SIZE = int(os.environ["WORLD_SIZE"])  # 8x2, global world size
 NODE_SIZE = WORLD_SIZE // LOCAL_WORLD_SIZE
 
-
 logger.info(f"NCCL version is {torch.cuda.nccl.version()}")
+logger.info(f"Torch supports architectures: {torch.cuda.get_arch_list()}")
 logger.info(
     f"Hi, I'm LOCAL_RANK: {LOCAL_RANK}, RANK: {RANK}, WORLD_SIZE:{WORLD_SIZE}, LOCAL_WORLD_SIZE:{LOCAL_WORLD_SIZE}, NODE_SIZE:{NODE_SIZE}"
 )
@@ -72,8 +73,12 @@ def main():
     test_dir = os.environ["SM_CHANNEL_TEST"]
     model_dir = os.environ["SM_CHANNEL_MODEL"]
 
-    script_args.default_dtype = get_default_dtype(script_args)
-
+    script_args.default_dtype = get_default_dtype(script_args.default_dtype)
+    if script_args.default_dtype == torch.bfloat16:
+        training_args.bf16 = True
+    elif script_args.default_dtype == torch.float16:
+        training_args.fp16 = True
+    logger.info(f"Using default dtype: {script_args.default_dtype}")
     if training_args.group_by_length and script_args.packing:
         raise ValueError("Cannot use both packing and group by length")
 
@@ -92,6 +97,7 @@ def main():
 
     # Load in local base model if it exists, else set HF hub ID
     script_args.base_model = get_base_model(model_dir, script_args.model_name)
+    logger.info(f"Using base model: {script_args.base_model}")
 
     peft_config, quantization_config = get_lora_and_quantization_configs(script_args, training_args)
 
@@ -133,17 +139,18 @@ def main():
         train_dataset = processing_function(
             train_dataset,
             tokenizer,
-            **script_args,
-            **training_args,
+            **asdict(script_args),
+            **asdict(training_args),
         )
         eval_dataset = processing_function(
             eval_dataset,
             tokenizer,
-            **script_args,
-            **training_args,
+            **asdict(script_args),
+            **asdict(training_args),
         )
 
     collator = get_data_collator(tokenizer, model, script_args)
+    logger.info(f"Using {collator.__class__.__name__} as data collator")
 
     if script_args.sft_formatting_function is not None:
         module = importlib.import_module('utils.data_processing')
@@ -170,7 +177,7 @@ def main():
         tokenizer,
         model,
         training_args.output_dir,
-        script_args,
+        script_args.default_dtype,
         peft_config,
     )
 

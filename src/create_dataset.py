@@ -1,8 +1,6 @@
 import os
 import logging
 import typer
-from typing import Union
-from datasets import load_dataset, Dataset
 from transformers import AutoTokenizer
 from scripts.utils.data_processing import (
     get_dummy_instruction_dataset,

@@ -29,15 +29,16 @@ def get_base_model(local_model_dir, model_name):
     return base_model
 
 
-def get_default_dtype(script_args):
-    if script_args.default_dtype == "bf16":
+def get_default_dtype(default_dtype_string):
+    if default_dtype_string == "bf16":
         default_dtype = torch.bfloat16
-    elif script_args.default_dtype == "fp16":
+    elif default_dtype_string == "fp16":
         default_dtype = torch.float16
-    elif script_args.default_dtype == "fp32":
+    elif default_dtype_string == "fp32":
         default_dtype = torch.float32
     else:
-        raise ValueError("default_dtype must be one of bf16, fp16, or fp32")
+        raise ValueError(f"default_dtype must be one of bf16, fp16, or fp32, \
+                         currently {default_dtype_string}")
 
     return default_dtype
 
@@ -170,7 +171,7 @@ def upload_model_to_s3(output_dir):
 
 
 # Since model is only saved on main process, check lora loading
-def save_model_wrapper(trainer, tokenizer, model, output_dir, script_args, peft_config):
+def save_model_wrapper(trainer, tokenizer, model, output_dir, default_dtype, peft_config):
     # save the model, tokenizer and states
     trainer.save_state()
     trainer.save_model()
@@ -195,7 +196,7 @@ def save_model_wrapper(trainer, tokenizer, model, output_dir, script_args, peft_
             model = AutoPeftModelForCausalLM.from_pretrained(
                 final_checkpoint_dir,
                 device_map="auto",
-                torch_dtype=script_args.default_dtype,
+                torch_dtype=default_dtype,
             )
             model = model.merge_and_unload()
 
