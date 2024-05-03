@@ -114,7 +114,7 @@ class ScriptArguments:
         default='bf16', metadata={"help": "Can be one of bf16, fp16, or fp32"}
     )
     attn_implementation: Optional[str] = field(
-        default="flash_attention_2", metadata={"help": "Can be one of eager, sdpa, or flash_attention_2"}
+        default="eager", metadata={"help": "Can be one of eager, sdpa, or flash_attention_2"}
     )
     response_template: Optional[str] = field(
         default="<|start_header_id|>assistant<|end_header_id|>",

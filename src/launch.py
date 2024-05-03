@@ -58,13 +58,13 @@ def run_estimator(sm_args, script_args, training_args, inference_args, sys_argv)
     hyperparameters = {"sys_argv": " ".join(sys_argv)}
 
     environment = {
-        "NCCL_DEBUG": "INFO",
+        "NCCL_DEBUG": "TRACE",
         "HUGGINGFACE_HUB_CACHE": "/tmp/.cache",
     }
 
     account = sess.boto_session.client("sts").get_caller_identity()["Account"]
     region = sess.boto_session.region_name
-    image = "{}.dkr.ecr.{}.amazonaws.com/llm-deepspeed:latest".format(account, region)
+    image = "{}.dkr.ecr.{}.amazonaws.com/llm-deepspeed:dev".format(account, region)
     logger.info(f"image:{image}")
 
     huggingface_estimator = sagemaker.estimator.Estimator(
