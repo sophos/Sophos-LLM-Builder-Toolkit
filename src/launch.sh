@@ -20,8 +20,8 @@ python -u launch.py \
 --s3_model_path="s3://sagemaker-us-east-1-112175135365/trl-dpo-llama2-7bhf-2024-01-19-01-50-43/uploaded_model/final/checkpoint/" \
 --job_prefix="${job_prefix}" \
 --code_entry_point="dpo_train.py" \
---hf_token="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" \
---wandb_api_key="22631c1e393b1805609fb03c829138cd6862ccc9" \
+--hf_token="" \
+--wandb_api_key="" \
 --model_name="/opt/ml/input/data/model" \
 --dataset_name="lvwerra/stack-exchange-paired" \
 --packing=True \
