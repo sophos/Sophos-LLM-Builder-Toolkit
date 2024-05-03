@@ -32,9 +32,9 @@ def get_base_model(local_model_dir, model_name):
 def get_default_dtype(script_args):
     if script_args.default_dtype == "bf16":
         default_dtype = torch.bfloat16
-    if script_args.default_dtype == "fp16":
+    elif script_args.default_dtype == "fp16":
         default_dtype = torch.float16
-    if script_args.default_dtype == "fp32":
+    elif script_args.default_dtype == "fp32":
         default_dtype = torch.float32
     else:
         raise ValueError("default_dtype must be one of bf16, fp16, or fp32")
