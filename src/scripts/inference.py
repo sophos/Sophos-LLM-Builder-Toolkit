@@ -1,13 +1,19 @@
 import os
 import sys
 from dataclasses import asdict
+import importlib
 import logging
 import time
 import datetime
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
-from transformers import AutoConfig, HfArgumentParser, GenerationConfig
+from transformers import (
+    AutoConfig,
+    HfArgumentParser,
+    GenerationConfig,
+    TrainingArguments,
+)
 from accelerate import load_checkpoint_and_dispatch
 from datasets import load_from_disk
 from utils.inference_utils import DSPipeline, torch_default_data_collator
@@ -48,8 +54,8 @@ def accelerate_pipeline_parallelism_inference():
 
 
 def main():
-    parser = HfArgumentParser((InferenceArguments, ScriptArguments))
-    inference_args, script_args, remaining_args = parser.parse_args_into_dataclasses(
+    parser = HfArgumentParser((InferenceArguments, ScriptArguments, TrainingArguments))
+    inference_args, script_args, training_args, remaining_args = parser.parse_args_into_dataclasses(
         return_remaining_strings=True
     )
     logger.info(f"inference_args:{inference_args}")
@@ -86,8 +92,6 @@ def main():
     model_hidden_size = config.hidden_size
 
     test_dataset = load_from_disk(test_dir)
-    test_dataset = Dataset.from_dict(test_dataset[:24])
-    logger.info(f"Test features are {test_dataset.features}")
 
     # ZeRO-Inference applies data distribution so using the same inputs for each GPU reduces efficiency by 1/Ngpu 
     # Thus batch size must be freater than or equal to world size
@@ -161,10 +165,23 @@ def main():
     )
     logger.info('Initialized inference pipeline object')
 
+    if script_args.processing_function is not None:
+        module = importlib.import_module('utils.data_processing')
+        processing_function = getattr(module, script_args.processing_function)
+    else:
+        processing_function = None
+
+    # Apply post-processing function specified in script_args
+    if processing_function is not None:
+        test_dataset = processing_function(
+            test_dataset,
+            pipe.tokenizer,
+            **asdict(script_args),
+            **asdict(training_args),
+        )
+    logger.info(f"Test features are {test_dataset.features}")
+
     if inference_args.inference_type == 'accelerate':
-        # pipe.model = load_checkpoint_and_dispatch(
-        #     pipe.model, checkpoint=model_dir, device_map="auto"
-        # )
         pass
     elif inference_args.inference_type == 'deepspeed_zero':
         # Initialise Deepspeed ZeRO and store only the engine object

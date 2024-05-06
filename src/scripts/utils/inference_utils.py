@@ -101,15 +101,9 @@ class DSPipeline():
         self.config = AutoConfig.from_pretrained(self.model_name)
 
         if self.inference_type == "accelerate":
-            # # https://huggingface.co/docs/accelerate/v0.11.0/en/big_modeling
-            # with init_empty_weights():
-            #     self.model = AutoModelForCausalLM.from_config(
-            #         self.config
-            #     )
-
+            # https://huggingface.co/docs/accelerate/v0.11.0/en/big_modeling
             self.model = AutoModelForCausalLM.from_pretrained(
                 self.model_name,
-                # low_cpu_mem_usage=True,
                 device_map="balanced_low_0",
                 torch_dtype=self.dtype,
                 use_cache=False,
