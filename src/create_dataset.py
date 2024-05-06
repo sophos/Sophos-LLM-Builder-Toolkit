@@ -1,6 +1,7 @@
 import os
 import logging
-import typer
+import cyclopts
+from typing import Union
 from transformers import AutoTokenizer
 from scripts.utils.data_processing import (
     get_dummy_instruction_dataset,
@@ -15,7 +16,10 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+app = cyclopts.App()
 
+
+@app.default
 def main(
     s3_upload_dir: str,
     process_locally: bool = True,
@@ -23,8 +27,9 @@ def main(
     hf_token: str = None,
     max_length: int = 4096,
     truncation: bool = True,
-    padding: bool = False,
+    padding: Union[bool, str] = False,
     add_generation_prompt: bool = False,
+    remove_columns: bool = True,
 ):
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -52,6 +57,7 @@ def main(
                 truncation=truncation,
                 padding=padding,
                 add_generation_prompt=add_generation_prompt,
+                remove_columns=remove_columns,
             )
 
     # save train_dataset to s3
@@ -67,4 +73,4 @@ def main(
 
 
 if __name__ == "__main__":
-    typer.run(main)
+    app()
