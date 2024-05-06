@@ -79,10 +79,10 @@ class InferenceArguments:
         default=1.0, metadata={"help": "If set to float < 1, only the smallest set of most probable tokens with probabilities that add up to top_p or higher are kept for generation"}
     )
     eos_tokens: Optional[str] = field(
-        default=None, metadata={"help": "Terminator tokens separated by commas"}
+        default=None, metadata={"help": "Terminator tokens, the IDs, separated by commas"}
     )
-    deepspeed_zero_inference: Optional[bool] = field(
-        default=True, metadata={"help": "Whether to use ZeRO-Inference"}
+    skip_special_tokens: Optional[bool] = field(
+        default=False, metadata={"help": "Whether or not to remove special tokens in the decoding"}
     )
     replace_with_kernel_inject: Optional[bool] = field(
         default=True, metadata={"help": "Whether to use replace with custom kernels during DeepSpeed-Inference"}
@@ -90,7 +90,7 @@ class InferenceArguments:
     cpu_offload: Optional[bool] = field(
         default=False, metadata={"help": "Whether to offload parameters to the CPU during ZeRO-Inference"}
     )
-    per_device_test_batch_size: Optional[int] = field(
+    test_batch_size: Optional[int] = field(
         default=8, metadata={"help": "Per process batch size during inference"}
     )
     inference_type: Optional[str] = field(

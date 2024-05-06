@@ -49,6 +49,7 @@ def dummy_processing_function(
         truncation: bool = True,
         padding: Union[bool, str] = False,
         add_generation_prompt: bool = False,
+        remove_columns: bool = True,
         **kwargs,
 ) -> Dataset:
     """
@@ -76,7 +77,7 @@ def dummy_processing_function(
             pad_to_multiple_of=8,
         ),
         batched=True,
-        remove_columns=list(dataset.features),
+        remove_columns=list(dataset.features) if remove_columns else None,
     )
     dataset = dataset.map(add_labels, batched=True)
 

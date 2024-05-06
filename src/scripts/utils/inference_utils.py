@@ -6,6 +6,7 @@ import os
 import glob
 from pathlib import Path
 import pandas as pd
+import numpy as np
 import awswrangler as wr
 import deepspeed
 import torch
@@ -15,10 +16,31 @@ from transformers.integrations import HfDeepSpeedConfig
 from accelerate import init_empty_weights
 import deepspeed.comm as dist
 from collections import OrderedDict
-from typing import Dict, Union, Tuple, List
+from typing import Dict, Union, Tuple, List, Any, NewType
+from collections.abc import Mapping
 import logging
 
 logger = logging.getLogger(__name__)
+
+InputDataClass = NewType("InputDataClass", Any)
+
+
+# https://github.com/huggingface/transformers/blob/v4.40.1/src/transformers/data/data_collator.py#L74
+def torch_default_data_collator(features: List[InputDataClass]) -> Dict[str, Any]:
+    if not isinstance(features[0], Mapping):
+        features = [vars(f) for f in features]
+    first = features[0]
+    batch = {}
+
+    for k, v in first.items():
+        if isinstance(v, torch.Tensor):
+            batch[k] = torch.stack([f[k] for f in features])
+        elif isinstance(v, np.ndarray):
+            batch[k] = torch.tensor(np.stack([f[k] for f in features]))
+        else:
+            batch[k] = [f[k] for f in features]
+
+    return batch
 
 
 class DSPipeline():
@@ -48,12 +70,15 @@ class DSPipeline():
                  device: Union[torch.device, str, int] = -1,
                  trust_remote_code: bool = False,
                  attn_implementation: str = 'flash_attention_2',
+                 skip_special_tokens: bool = False,
                  ):
         self.model_name = model_name
+        self.inference_type = inference_type
         self.model_name = model_name
         self.dtype = dtype
         self.local_rank = local_rank
         self.world_rank = world_rank
+        self.skip_special_tokens = skip_special_tokens
 
         if isinstance(device, torch.device):
             self.device = device
@@ -76,12 +101,21 @@ class DSPipeline():
         self.config = AutoConfig.from_pretrained(self.model_name)
 
         if self.inference_type == "accelerate":
-            # https://huggingface.co/docs/accelerate/v0.11.0/en/big_modeling
-            with init_empty_weights():
-                self.model = AutoModelForCausalLM.from_config(
-                    self.config
-                )
+            # # https://huggingface.co/docs/accelerate/v0.11.0/en/big_modeling
+            # with init_empty_weights():
+            #     self.model = AutoModelForCausalLM.from_config(
+            #         self.config
+            #     )
 
+            self.model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                # low_cpu_mem_usage=True,
+                device_map="balanced_low_0",
+                torch_dtype=self.dtype,
+                use_cache=False,
+                trust_remote_code=trust_remote_code,
+                attn_implementation=attn_implementation,
+            )
         elif self.inference_type == "deepspeed_zero":
             # The next line ensures transformers will partition the model directly across multiple GPUs
             # This is performed by the model's `from_pretrained` calling deepspeed.zero.Init
@@ -179,12 +213,15 @@ class DSPipeline():
                 inputs.pop('token_type_ids', None)
 
         # Send all input fields to the device for the current process
-        for t in inputs:
+        for t in list(inputs.keys()):
             if torch.is_tensor(inputs[t]):
                 inputs[t] = inputs[t].to(self.device)
+                # inputs[t] = inputs[t].to("cuda:0")
+            else:
+                del inputs[t]
 
         outputs = self.model.generate(**inputs, **generation_config)
-        outputs = self.tokenizer.batch_decode(outputs, skip_special_tokens=True)
+        outputs = self.tokenizer.batch_decode(outputs, skip_special_tokens=self.skip_special_tokens)
 
         return outputs
 
@@ -196,6 +233,8 @@ class DSPipeline():
             dataset=True,
             filename_prefix=f"generations_rank_{self.world_rank}_" if self.inference_type == "deepspeed_zero" else "generations_",
             )
+
+        logger.info(f"Uploaded generations to {s3_upload_dir}")
 
     def _zero3_consolidated_16bit_state_dict(self, model_to_consolidate: nn.Module) -> Dict:
         """
