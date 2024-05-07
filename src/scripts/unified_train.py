@@ -94,12 +94,16 @@ def main():
         training_args.fp16 = True
     logger.info(f"Using default dtype: {script_args.default_dtype}")
 
+    with open(training_args.deepspeed, 'r') as f_in:
+        script_args.loaded_ds_cfg = json.load(f_in)
+
     # Load test and train datasets as a datasets.Dataset object
     train_dataset = load_from_disk(training_dir)
     eval_dataset = load_from_disk(test_dir)
 
-    logger.info(f" loaded train_dataset length is: {len(train_dataset)}")
-    logger.info(f" loaded test_dataset length is: {len(eval_dataset)}")
+    logger.info(f"Loaded train_dataset length is: {len(train_dataset)}")
+    logger.info(f"Loaded test_dataset length is: {len(eval_dataset)}")
+    logger.info(f"Train dataset features: {train_dataset.features}")
 
     if script_args.processing_function is not None:
         module = importlib.import_module('utils.data_processing')
@@ -111,17 +115,16 @@ def main():
     script_args.base_model = get_base_model(model_dir, script_args.model_name)
     logger.info(f"Using base model: {script_args.base_model}")
 
-    peft_config, quantization_config = get_lora_and_quantization_configs(script_args, training_args)
+    if script_args.trainer_type == "trainer":
+        peft_config, quantization_config = None, None
+    else:
+        peft_config, quantization_config = get_lora_and_quantization_configs(script_args)
 
     logger.info(f"peft_config:{peft_config}")
     logger.info(f"quantization_config:{quantization_config}")
 
-    # Need to save model weights on each node if using ZeRO 3
-    with open(training_args.deepspeed) as f_in:
-        ds_config = json.load(f_in)
-    if ds_config["zero_optimization"]["stage"] == 3:
-        if not training_args.save_on_each_node:
-            raise ValueError("Model must be saved on each node for ZeRO-3")
+    if peft_config is not None:
+        training_args.save_on_each_node = True
 
     # Helps to save memory
     training_args.gradient_checkpointing = True
@@ -146,9 +149,8 @@ def main():
         token=True,
         use_cache=False,
         trust_remote_code=script_args.trust_remote_code,
-        # DeepSpeed Zero-3 is not compatible with `low_cpu_mem_usage=True` or with passing a `device_map`
-        # https://github.com/huggingface/peft/issues/306
         torch_dtype=script_args.default_dtype,
+        quantization_config=quantization_config,
         attn_implementation=script_args.attn_implementation,
     )
 
@@ -159,16 +161,18 @@ def main():
         ]
 
     if script_args.trainer_type == 'dpo':
-        model_ref = AutoModelForCausalLM.from_pretrained(
-            script_args.base_model,
-            token=True,
-            use_cache=False,
-            trust_remote_code=script_args.trust_remote_code,
-            # DeepSpeed Zero-3 is not compatible with `low_cpu_mem_usage=True` or with passing a `device_map`
-            torch_dtype=script_args.default_dtype,
-            quantization_config=quantization_config,
-            attn_implementation=script_args.attn_implementation,
-        )
+        if peft_config is None:
+            model_ref = AutoModelForCausalLM.from_pretrained(
+                script_args.base_model,
+                token=True,
+                use_cache=False,
+                trust_remote_code=script_args.trust_remote_code,
+                torch_dtype=script_args.default_dtype,
+                quantization_config=quantization_config,
+                attn_implementation=script_args.attn_implementation,
+            )
+        else:
+            model_ref = None
         logger.info(f"model_ref:{model_ref}")
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -179,10 +183,10 @@ def main():
         token=True,
     )
     tokenizer.pad_token = tokenizer.eos_token
+    logger.info(f"tokenizer:{tokenizer}")
 
-    # Sanity check
-    # This should show an empty model due to prior initialization with deepspeed.zero.Init() when AutoModelForCausalLM.from_pretrained() was called
     if RANK == 0:
+        # This should show an empty model due to prior initialization with deepspeed.zero.Init() when AutoModelForCausalLM.from_pretrained() was called
         logger.info(
             deepspeed.runtime.zero.stage3.estimate_zero3_model_states_mem_needs_all_live(
                 model, num_gpus_per_node=LOCAL_WORLD_SIZE, num_nodes=NODE_SIZE
@@ -232,9 +236,6 @@ def main():
             tokenizer=tokenizer,
             data_collator=collator,
         )
-
-        peft_config = None
-
     elif script_args.trainer_type == 'trainer':
         trainer = Trainer(
             model=model,
@@ -245,9 +246,6 @@ def main():
             tokenizer=tokenizer,
             data_collator=collator,
         )
-
-        peft_config = None
-
     elif script_args.trainer_type == 'sft':
         if training_args.group_by_length and script_args.packing:
             raise ValueError("Cannot use both packing and group by length")
@@ -270,7 +268,6 @@ def main():
             tokenizer=tokenizer,
             args=training_args,
         )
-
     elif script_args.trainer_type == 'dpo':
         trainer = DPOTrainer(
             model,
@@ -286,7 +283,6 @@ def main():
             max_prompt_length=script_args.max_prompt_length,
             max_length=script_args.max_length,
         )
-
     elif script_args.trainer_type == 'orpo':
         shared_training_params = {
                 f.name: getattr(training_args, f.name) for f in fields(training_args) if f.init
@@ -309,17 +305,14 @@ def main():
             eval_dataset=eval_dataset,
             data_collator=collator,
             tokenizer=tokenizer,
+            peft_config=peft_config,
         )
-
     else:
         raise ValueError(f"trainer_type must be one of trainer, sft, dpo, or orpo, currently {trainer_type}")
-    
+
     logger.info(f"Using {trainer.__class__.__name__} as Trainer")
 
     trainer.train()
-
-    # Use SFT if parameter efficient tuning is needed
-    peft_config = None
 
     # The save directory must be a folder outside of /opt/ml/model
     # SageMaker automatically compresses all files under /opt/ml/model which is time consuming for LLMs

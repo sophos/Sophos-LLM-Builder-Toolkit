@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Dict
 
 
 @dataclass
@@ -182,7 +182,14 @@ class ScriptArguments:
         default=False, metadata={"help": "only train on 1000 samples"}
     )
 
+    loaded_ds_cfg: Optional[Dict] = field(
+        default=None, metadata={"help": "Dictionary representation of ds_cfg to be loaded for checks"}
+    )
+
     # LoraConfig
+    use_peft: Optional[bool] = field(
+        default=False, metadata={"help": "Whether or not to use LoRA during training"}
+    )
     lora_alpha: Optional[float] = field(
         default=16, metadata={"help": "the lora alpha parameter"}
     )

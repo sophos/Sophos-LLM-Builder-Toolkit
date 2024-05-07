@@ -104,14 +104,6 @@ def main():
     script_args.base_model = get_base_model(model_dir, script_args.model_name)
     logger.info(f"Using base model: {script_args.base_model}")
 
-    # Need to save model weights on each node if using ZeRO 3
-    with open(training_args.deepspeed) as f_in:
-        ds_config = json.load(f_in)
-    if ds_config["zero_optimization"]["stage"] == 3:
-        if not training_args.save_on_each_node:
-            raise ValueError(f"Model must be saved on each node for ZeRO-3, \
-                             currently {training_args.save_on_each_node}")
-
     # Helps to save memory
     training_args.gradient_checkpointing = True
 
@@ -135,11 +127,10 @@ def main():
         token=True,
         use_cache=False,
         trust_remote_code=script_args.trust_remote_code,
-        # DeepSpeed Zero-3 is not compatible with `low_cpu_mem_usage=True` or with passing a `device_map`
-        # https://github.com/huggingface/peft/issues/306
         torch_dtype=script_args.default_dtype,
         attn_implementation=script_args.attn_implementation,
     )
+    logger.info(f"model:{model}")
 
     tokenizer = AutoTokenizer.from_pretrained(
         script_args.base_model,
@@ -149,10 +140,10 @@ def main():
         token=True,
     )
     tokenizer.pad_token = tokenizer.eos_token
+    logger.info(f"tokenizer:{tokenizer}")
 
-    # Sanity check
-    # This should show an empty model due to prior initialization with deepspeed.zero.Init() when AutoModelForCausalLM.from_pretrained() was called
     if RANK == 0:
+        # This should show an empty model due to prior initialization with deepspeed.zero.Init() when AutoModelForCausalLM.from_pretrained() was called
         logger.info(
             deepspeed.runtime.zero.stage3.estimate_zero3_model_states_mem_needs_all_live(
                 model, num_gpus_per_node=int(LOCAL_WORLD_SIZE), num_nodes=NODE_SIZE

@@ -1,9 +1,9 @@
 import os
 import sys
-from dataclasses import asdict
+import json
+from dataclasses import fields, asdict
 import importlib
 import logging
-from dataclasses import fields
 
 import torch
 import torch.distributed as dist
@@ -15,7 +15,6 @@ from transformers import (
     TrainingArguments,
 )
 
-# from trl import SFTTrainer
 from trl import ORPOConfig, ORPOTrainer
 from utils.data_args import ScriptArguments
 from utils.training_utils import (
@@ -82,12 +81,16 @@ def main():
         training_args.fp16 = True
     logger.info(f"Using default dtype: {script_args.default_dtype}")
 
+    with open(training_args.deepspeed, 'r') as f_in:
+        script_args.loaded_ds_cfg = json.load(f_in)
+
     # Load test and train datasets as a datasets.Dataset object
     train_dataset = load_from_disk(training_dir)
     eval_dataset = load_from_disk(test_dir)
 
-    logger.info(f" loaded train_dataset length is: {len(train_dataset)}")
-    logger.info(f" loaded test_dataset length is: {len(eval_dataset)}")
+    logger.info(f"Loaded train_dataset length is: {len(train_dataset)}")
+    logger.info(f"Loaded test_dataset length is: {len(eval_dataset)}")
+    logger.info(f"Train dataset features: {train_dataset.features}")
 
     if script_args.processing_function is not None:
         module = importlib.import_module('utils.data_processing')
@@ -99,17 +102,21 @@ def main():
     script_args.base_model = get_base_model(model_dir, script_args.model_name)
     logger.info(f"Using base model: {script_args.base_model}")
 
-    peft_config, quantization_config = get_lora_and_quantization_configs(script_args, training_args)
+    peft_config, quantization_config = get_lora_and_quantization_configs(script_args)
 
     logger.info(f"peft_config:{peft_config}")
     logger.info(f"quantization_config:{quantization_config}")
+
+    if peft_config is not None:
+        training_args.save_on_each_node = True
+
+    training_args.gradient_checkpointing = True
 
     model = AutoModelForCausalLM.from_pretrained(
         script_args.base_model,
         token=True,
         use_cache=False,
         trust_remote_code=script_args.trust_remote_code,
-        # DeepSpeed Zero-3 is not compatible with `low_cpu_mem_usage=True` or with passing a `device_map`
         torch_dtype=script_args.default_dtype,
         quantization_config=quantization_config,
         attn_implementation=script_args.attn_implementation,
@@ -124,6 +131,7 @@ def main():
         token=True,
     )
     tokenizer.pad_token = tokenizer.eos_token
+    logger.info(f"tokenizer:{tokenizer}")
 
     if RANK == 0:
         # This should show an empty model due to prior initialization with deepspeed.zero.Init() when AutoModelForCausalLM.from_pretrained() was called
@@ -171,6 +179,7 @@ def main():
         eval_dataset=eval_dataset,
         data_collator=collator,
         tokenizer=tokenizer,
+        peft_config=peft_config,
     )
 
     trainer.train()

@@ -1,6 +1,7 @@
 import os
 import glob
 import logging
+from typing import Tuple
 import torch
 from peft import LoraConfig
 from transformers import (
@@ -8,16 +9,21 @@ from transformers import (
     DataCollatorForSeq2Seq,
     DataCollatorWithPadding,
     BitsAndBytesConfig,
+    AutoTokenizer,
+    AutoModel,
+    Trainer,
+    DataCollator,
 )
 from peft import AutoPeftModelForCausalLM
 from trl import DataCollatorForCompletionOnlyLM
 from trl.trainer.utils import DPODataCollatorWithPadding
 from trl.import_utils import is_npu_available, is_xpu_available
+from .data_args import ScriptArguments
 
 logger = logging.getLogger(__name__)
 
 
-def get_base_model(local_model_dir, model_name):
+def get_base_model(local_model_dir: str, model_name: str) -> str:
     # Use model dir as base model else download from hub
     safetensor_files = glob.glob(os.path.join(local_model_dir, '*.safetensors'))
     bin_files = glob.glob(os.path.join(local_model_dir, '*.bin'))
@@ -29,7 +35,7 @@ def get_base_model(local_model_dir, model_name):
     return base_model
 
 
-def get_default_dtype(default_dtype_string):
+def get_default_dtype(default_dtype_string: str) -> torch.dtype:
     if default_dtype_string == "bf16":
         default_dtype = torch.bfloat16
     elif default_dtype_string == "fp16":
@@ -43,13 +49,19 @@ def get_default_dtype(default_dtype_string):
     return default_dtype
 
 
-def get_lora_and_quantization_configs(script_args, training_args):
-    if script_args.lora_r > 0:
+def get_lora_and_quantization_configs(script_args: ScriptArguments) -> Tuple[LoraConfig, BitsAndBytesConfig]:
+    # Check if list of modules or wildcard like all-linear
+    if ',' in script_args.lora_target_modules:
+        target_modules = script_args.lora_target_modules.split(',')
+    else:
+        target_modules = script_args.lora_target_modules
+
+    if script_args.use_peft:
         peft_config = LoraConfig(
             r=script_args.lora_r,
             lora_alpha=script_args.lora_alpha,
             lora_dropout=script_args.lora_dropout,
-            target_modules=script_args.lora_target_modules.split(','),
+            target_modules=target_modules,
             bias="none",
             task_type="CAUSAL_LM",
         )
@@ -66,18 +78,21 @@ def get_lora_and_quantization_configs(script_args, training_args):
         bnb_4bit_compute_dtype=script_args.default_dtype,
         bnb_4bit_quant_type=script_args.bnb_4bit_quant_type,
         bnb_4bit_use_double_quant=False,
-        bnb_4bit_quant_storage=None,
+        bnb_4bit_quant_storage=script_args.default_dtype,
     )
 
-    if training_args.deepspeed:
+    # ZeRO-3 + Quantization is not currently supported
+    # https://huggingface.co/docs/peft/accelerate/deepspeed
+    if script_args.loaded_ds_cfg["zero_optimization"]["stage"] == 3:
         quantization_config = None
+        logger.warning("Quantization + ZeRO-3 not compatible, quantization set to None")
     else:
         quantization_config = bnb_config
 
     return peft_config, quantization_config
 
 
-def get_data_collator(tokenizer, model, script_args):
+def get_data_collator(tokenizer: AutoTokenizer, model: AutoModel, script_args: ScriptArguments) -> DataCollator:
     '''
     orpo default - DPODataCollatorWithPadding
     dpo default - DPODataCollatorWithPadding
@@ -107,6 +122,7 @@ def get_data_collator(tokenizer, model, script_args):
             # Keep this value to maximize the benefits of tensor cores
             pad_to_multiple_of=8,
             return_tensors="pt",
+            tokenizer=tokenizer,
         )
     elif script_args.task_collator == "seq2seq":
         # Does dynamic padding
@@ -153,7 +169,7 @@ def get_data_collator(tokenizer, model, script_args):
     return collator
 
 
-def upload_dir_to_s3(dest_dir, src_dir):
+def upload_dir_to_s3(dest_dir: str, src_dir: str):
     # append "/" to the end of dir.
     dest_dir = dest_dir if dest_dir[-1] == "/" else dest_dir + "/"
     src_dir = src_dir if src_dir[-1] == "/" else src_dir + "/"
@@ -163,7 +179,7 @@ def upload_dir_to_s3(dest_dir, src_dir):
     os.system(copy_cmd)
 
 
-def upload_model_to_s3(output_dir):
+def upload_model_to_s3(output_dir: str):
     SM_MODULE_DIR = os.environ["SM_MODULE_DIR"]
     s3_base_dir = SM_MODULE_DIR[: SM_MODULE_DIR.find("/source/sourcedir.tar.gz")]
     s3_dest_dir = os.path.join(s3_base_dir, "uploaded_model")
@@ -171,15 +187,20 @@ def upload_model_to_s3(output_dir):
 
 
 # Since model is only saved on main process, check lora loading
-def save_model_wrapper(trainer, tokenizer, model, output_dir, default_dtype, peft_config):
+def save_model_wrapper(
+        trainer: Trainer,
+        tokenizer: AutoTokenizer,
+        model: AutoModel,
+        output_dir: str,
+        default_dtype: torch.dtype,
+        peft_config: LoraConfig
+):
     # save the model, tokenizer and states
+    final_checkpoint_dir = os.path.join(output_dir, "model_weights/checkpoint")
     trainer.save_state()
-    trainer.save_model()
-
-    final_checkpoint_dir = os.path.join(output_dir, "final/checkpoint")
     trainer.save_model(final_checkpoint_dir)
     tokenizer.save_pretrained(final_checkpoint_dir)
-    logger.info(f"final_checkpoint_dir:{final_checkpoint_dir}")
+    logger.info(f"final_checkpoint_dir: {final_checkpoint_dir}")
 
     # Free memory for merging weights
     del model
@@ -190,9 +211,15 @@ def save_model_wrapper(trainer, tokenizer, model, output_dir, default_dtype, pef
     else:
         torch.cuda.empty_cache()
 
-    # save the merged adaptor model.
+    # Save the merged adaptor model.
     try:
         if peft_config is not None:
+            # Prevent: Detected DeepSpeed ZeRO-3: activating zero.init() for this model
+            logger.info('Removing hf deepspeed config')
+            import transformers.integrations.deepspeed as ds_plugin
+            ds_plugin._hf_deepspeed_config_weak_ref = None
+            logger.info(f"Ref value is {ds_plugin._hf_deepspeed_config_weak_ref}")
+
             model = AutoPeftModelForCausalLM.from_pretrained(
                 final_checkpoint_dir,
                 device_map="auto",
@@ -201,9 +228,10 @@ def save_model_wrapper(trainer, tokenizer, model, output_dir, default_dtype, pef
             model = model.merge_and_unload()
 
             output_merged_dir = os.path.join(
-                output_dir, "final/merged_checkpoint"
+                output_dir, "model_weights/merged_checkpoint"
             )
             model.save_pretrained(output_merged_dir, safe_serialization=True)
-            logger.info(f"output_merged_dir:{output_merged_dir}")
+            tokenizer.save_pretrained(output_merged_dir)
+            logger.info(f"output_merged_dir: {output_merged_dir}")
     except Exception as ex:
         logger.error(f"AutoPeftModelForCausalLM.from_pretrained() error:{ex}")
