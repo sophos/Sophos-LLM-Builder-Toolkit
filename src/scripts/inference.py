@@ -92,6 +92,7 @@ def main():
     model_hidden_size = config.hidden_size
 
     test_dataset = load_from_disk(test_dir)
+    test_dataset = Dataset.from_dict(test_dataset[:24])
 
     # ZeRO-Inference applies data distribution so using the same inputs for each GPU reduces efficiency by 1/Ngpu 
     # Thus batch size must be freater than or equal to world size

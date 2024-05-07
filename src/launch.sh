@@ -20,7 +20,7 @@ python -u launch.py \
 --wandb_api_key="" \
 `# Trainer Args` \
 --log_level="debug" \
---save_on_each_node=True \
+--save_on_each_node=False \
 --per_device_eval_batch_size=1 \
 --per_device_train_batch_size=1 \
 --gradient_accumulation_steps=4 \
@@ -42,7 +42,6 @@ python -u launch.py \
 `# Start of Script Args` \
 --trainer_type="trainer" \
 --predict_with_generate=True \
---processing_function="dummy_processing_function" \
 --trust_remote_code=True \
 --default_dtype="bf16" \
 --attn_implementation="eager" \
@@ -52,7 +51,7 @@ python -u launch.py \
 --padding=False \
 --truncation=True \
 --add_generation_prompt=False \
---task_collator="dynamic_padding_only" \
+--task_collator="completion_only" \
 --mlm_probability=0.15 \
 --model_name="meta-llama/Meta-Llama-3-8B" \
 --base_model="meta-llama/Meta-Llama-3-8B" \
@@ -61,14 +60,16 @@ python -u launch.py \
 --seq_length=8192 \
 --packing=True \
 `# LoRA` \
+--use_peft=False \
 --lora_alpha=16 \
 --lora_dropout=0.05 \
 --lora_target_modules="q_proj,v_proj,k_proj,out_proj,fc_in,fc_out,wte" \
---lora_r=0 \
+--lora_r=8 \
 `# Quant` \
 --load_in_8bit=False \
 --load_in_4bit=False \
 --bnb_4bit_quant_type="nf4" \
+# RLHF
 --beta=0.1 \
 --max_prompt_length=512 \
 --max_length=8192 \

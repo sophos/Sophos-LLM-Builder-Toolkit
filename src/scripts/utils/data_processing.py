@@ -9,12 +9,37 @@ logger = logging.getLogger(__name__)
 
 
 def get_dummy_instruction_dataset(dataset_name: str) -> Dataset:
-    # HuggingFaceH4/no_robots -> SFT and Trainer
-    # trl-internal-testing/hh-rlhf-helpful-base-trl-style -> RLHF
+    """
+    Gets a default dataset to be used for debugging or testing the project's capabilities.
+
+    Args:
+        dataset_name (str): The HF hub repository and dataset name.
+
+    Returns:
+        Dataset: The raw dataset downloaded from the HF Hub.
+
+    Note:
+        Use the following standard datasets for testing the following training functionalities:
+        HuggingFaceH4/no_robots -> SFT and Trainer
+        trl-internal-testing/hh-rlhf-helpful-base-trl-style -> RLHF
+    """
     return load_dataset(dataset_name)
 
 
-def add_dummy_system_prompt(sample, field: str):
+def add_dummy_system_prompt(sample: Dataset, field: str) -> Dataset:
+    """
+    Adds a default system prompt to the data used in chat applications.
+
+    Args:
+        sample (Dataset): A batch or slice from the dataset.
+        field (str): The column name to add a system prompt to.
+
+    Returns:
+        Dataset: The processed batch or slice of the dataset.
+
+    Note:
+        The system prompt can be replaced with any apllicable prompt.
+    """
     system_prompt = {'content': 'You are a helpful AI assistant', 'role': 'system'}
     outputs = []
     for row in sample[field]:
@@ -25,10 +50,27 @@ def add_dummy_system_prompt(sample, field: str):
     return sample
 
 
-def add_chat_template(sample,
-                      tokenizer: AutoTokenizer,
-                      field: str,
-                      add_generation_prompt: bool = False):
+def add_chat_template(
+        sample: Dataset,
+        tokenizer: AutoTokenizer,
+        field: str,
+        add_generation_prompt: bool = False
+) -> Dataset:
+    """
+    Convert the dictionary representation of the conversation or chat to a formatted string that contains defined separation between the roles in the chat.
+
+    Args:
+        sample (Dataset): A batch or slice from the dataset.
+        tokenizer (AutoTokenizer): The pre-trained tokenizer object corresponding to the model.
+        field (str): The column name to add a system prompt to.
+        add_generation_prompt (bool): Whether or not to append a phrase to the end of the prompt corresponding to the trigger for the assistant.
+
+    Returns:
+        Dataset: The processed batch or slice of the dataset.
+
+    Note:
+        Not all models have tokenizers with a pre-defined chat template but instruction-tuned models generally should.
+    """
     outputs = []
     for row in sample[field]:
         tmp = tokenizer.apply_chat_template(
@@ -42,7 +84,7 @@ def add_chat_template(sample,
     return sample
 
 
-def add_labels(sample):
+def add_labels(sample: Dataset) -> Dataset:
     sample['labels'] = sample['input_ids']
     return sample
 
@@ -58,7 +100,24 @@ def dummy_processing_function(
         **kwargs,
 ) -> Dataset:
     """
-    ...
+    Process a chat dataset using batched processing and the .map functionality.
+
+    Args:
+        dataset (Dataset): The raw dataset to be processed.
+        tokenizer (AutoTokenizer): The pre-trained tokenizer object corresponding to the model.
+        max_length (int): The column name to add a system prompt to.
+        truncation (bool): The flag to set trunctation for the tokenizer's encode method.
+        padding (Union[bool, str]): The flag or style of padding to be passed to the tokenizer's encode method.
+        add_generation_prompt (bool): Whether or not to append a phrase to the end of the prompt corresponding to the trigger for the assistant.
+        remove_columns (bool): Whether or not to remove columns that are not outputs of the final processing step.
+
+    Returns:
+        Dataset: The processed dataset.
+
+    Note:
+        This format requires the messages field in the dataset.
+        This function may be called locally before training begins or during training by passing the function name to the processing_function field in the ScriptArguments dataclass.
+        Any replacement function must have the positional arguments in the same order and contain **kwargs.
     """
     logger.info(f"Example raw message: {dataset[0]['messages']}")
 
@@ -101,7 +160,23 @@ def dummy_rlhf_processing_function(
         add_generation_prompt: bool = False,
         **kwargs,
 ) -> Dataset:
+    """
+    Process a rlhf dataset using batched processing and the .map functionality.
 
+    Args:
+        dataset (Dataset): The raw dataset to be processed.
+        tokenizer (AutoTokenizer): The pre-trained tokenizer object corresponding to the model.
+        add_generation_prompt (bool): Whether or not to append a phrase to the end of the prompt corresponding to the trigger for the assistant.
+
+    Returns:
+        Dataset: The processed dataset.
+
+    Note:
+        The tokenization will be performed by the DPO or ORPO trainers. The format requires the prompt, chosen, and rejected string fields in the dataset.
+        Don't forget to set the remove_unused_columns flag to False in TrainingArguments if using this dataset.
+        This function may be called locally before training begins or during training by passing the function name to the processing_function field in the ScriptArguments dataclass.
+        Any replacement function must have the positional arguments in the same order and contain **kwargs.
+    """
     logger.info(f"Example raw text: {dataset[0]['chosen']}")
 
     dataset = dataset.map(
