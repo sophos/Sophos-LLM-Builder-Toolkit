@@ -8,24 +8,29 @@ from typing import Union
 logger = logging.getLogger(__name__)
 
 
-def get_dummy_instruction_dataset() -> Dataset:
-    return load_dataset("HuggingFaceH4/no_robots")
+def get_dummy_instruction_dataset(dataset_name: str) -> Dataset:
+    # HuggingFaceH4/no_robots -> SFT and Trainer
+    # trl-internal-testing/hh-rlhf-helpful-base-trl-style -> RLHF
+    return load_dataset(dataset_name)
 
 
-def add_dummy_system_prompt(sample):
+def add_dummy_system_prompt(sample, field: str):
     system_prompt = {'content': 'You are a helpful AI assistant', 'role': 'system'}
     outputs = []
-    for row in sample['messages']:
+    for row in sample[field]:
         tmp = list(row)
         tmp.insert(0, system_prompt)
         outputs.append(tmp)
-    sample["messages_with_prompt"] = outputs
+    sample[field] = outputs
     return sample
 
 
-def add_chat_template(sample, tokenizer: AutoTokenizer, add_generation_prompt: bool = False):
+def add_chat_template(sample,
+                      tokenizer: AutoTokenizer,
+                      field: str,
+                      add_generation_prompt: bool = False):
     outputs = []
-    for row in sample['messages_with_prompt']:
+    for row in sample[field]:
         tmp = tokenizer.apply_chat_template(
             row,
             tokenize=False,
@@ -33,7 +38,7 @@ def add_chat_template(sample, tokenizer: AutoTokenizer, add_generation_prompt: b
             add_generation_prompt=add_generation_prompt
         )
         outputs.append(tmp)
-    sample["chat_template"] = outputs
+    sample[field] = outputs
     return sample
 
 
@@ -55,22 +60,28 @@ def dummy_processing_function(
     """
     ...
     """
-    dataset = dataset.map(add_dummy_system_prompt, batched=True)
+    logger.info(f"Example raw message: {dataset[0]['messages']}")
+
+    dataset = dataset.map(
+        partial(add_dummy_system_prompt, field="messages"),
+        batched=True
+    )
+
     dataset = dataset.map(
         partial(
             add_chat_template,
             tokenizer=tokenizer,
+            field="messages",
             add_generation_prompt=add_generation_prompt
         ),
         batched=True
     )
 
-    logger.info(f"Example raw message: {dataset[0]['messages']}")
-    logger.info(f"Example processed chat template: {dataset[0]['chat_template']}")
+    logger.info(f"Example processed chat template: {dataset[0]['messages']}")
 
     dataset = dataset.map(
         lambda x: tokenizer(
-            x['chat_template'],
+            x['messages'],
             max_length=max_length,
             truncation=truncation,
             padding=padding,
@@ -84,6 +95,40 @@ def dummy_processing_function(
     return dataset
 
 
-def dummy_postprocessing_function(dataset, tokenizer, my_params=None, **kwargs):
+def dummy_rlhf_processing_function(
+        dataset: Dataset,
+        tokenizer: AutoTokenizer,
+        add_generation_prompt: bool = False,
+        **kwargs,
+) -> Dataset:
+
+    logger.info(f"Example raw text: {dataset[0]['chosen']}")
+
+    dataset = dataset.map(
+        partial(
+            add_chat_template,
+            tokenizer=tokenizer,
+            field="chosen",
+            add_generation_prompt=add_generation_prompt
+        ),
+        batched=True
+    )
+
+    logger.info(f"Example processed text template: {dataset[0]['chosen']}")
+
+    dataset = dataset.map(
+        partial(
+            add_chat_template,
+            tokenizer=tokenizer,
+            field="rejected",
+            add_generation_prompt=add_generation_prompt
+        ),
+        batched=True,
+    )
+
+    return dataset
+
+
+def dummy_postprocessing_function(dataset: Dataset, tokenizer: AutoTokenizer, my_params=None, **kwargs):
     logger.info("Processing function goes here")
     return dataset
