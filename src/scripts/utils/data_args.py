@@ -136,7 +136,7 @@ class ScriptArguments:
         default=False, metadata={"help": "Whether to end the prompt with the token(s) that indicate the start of an assistant message"}
     )    
     task_collator: Optional[str] = field(
-        default="generation", metadata={"help": "Can be one of completion_only, seq2seq, mlm, rl_dynamic_padding_only, dynamic_padding_only"}
+        default=None, metadata={"help": "Can be one of completion_only, seq2seq, mlm, rl_dynamic_padding_only, dynamic_padding_only"}
     )
     mlm_probability: Optional[float] = field(
         default=0.15, metadata={"help": "Probabiility that a token is masked out"}

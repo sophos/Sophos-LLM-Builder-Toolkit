@@ -35,6 +35,29 @@ def main(
     add_generation_prompt: bool = False,
     remove_columns: bool = True,
 ):
+    """
+    Download from HF Hub, process (optional), and upload to S3 before training begins.
+
+    Args:
+        s3_upload_dir (str): The S3 URI to save the dataset to.
+        debug (bool): If set the dataset will be truncated for quicker debugging.
+        processing_function (str): The processing function name from utils.data_processing as a string to be used.
+        process_locally (bool): Whether or not to process the dataset locally before training.
+        model_id (str): The HF Hub model ID or local directory from which to load the tokenizer.
+        dataset_name (str): The HF Hub dataset ID to be used.
+        hf_token (str): Your HF Hub access token.
+        max_length (int): The column name to add a system prompt to.
+        truncation (bool): The flag to set trunctation for the tokenizer's encode method.
+        padding (Union[bool, str]): The flag or style of padding to be passed to the tokenizer's encode method.
+        add_generation_prompt (bool): Whether or not to append a phrase to the end of the prompt corresponding to the trigger for the assistant.
+        remove_columns (bool): Whether or not to remove columns that are not outputs of the final processing step.
+
+    Returns:
+        None
+
+    Note:
+        Use this function before training to populate with data the train and test S3 URI inputs to the training job.
+    """
     tokenizer = AutoTokenizer.from_pretrained(
         model_id,
         truncation_side="right",

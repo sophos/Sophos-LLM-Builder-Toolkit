@@ -27,6 +27,18 @@ InputDataClass = NewType("InputDataClass", Any)
 
 # https://github.com/huggingface/transformers/blob/v4.40.1/src/transformers/data/data_collator.py#L74
 def torch_default_data_collator(features: List[InputDataClass]) -> Dict[str, Any]:
+    """
+    The data collator to be used during inference.
+
+    Args:
+        features (List[InputDataClass]): The raw slice indexed by the DataLoader for the current batch.
+
+    Returns:
+        Dict[str, Any]: The batch dictionary.
+
+    Note:
+        This data collator will return all non-tensor and non-array inputs as a list. Otherwise, the input tensors or arrays are concatenated.
+    """
     if not isinstance(features[0], Mapping):
         features = [vars(f) for f in features]
     first = features[0]
@@ -45,19 +57,22 @@ def torch_default_data_collator(features: List[InputDataClass]) -> Dict[str, Any
 
 class DSPipeline():
     """
-    Class for storing inference engines and artifacts for DeepSpeed enabled inference runtimes.
+    Class for loading and storing inference model artifacts and engines. It also wraps generation in its __call__ method.
 
     Args:
-        model_name (`Union[str, List[int]]`): the template form that indicates the start of the response, typically something like
-            '### Response:\n'. It can also be passed as tokenized ids, which can be useful when using a tokenizer that encodes the response
-            differently if it does not have proper context.
-        instruction_template (`Union[str, List[int]]`): the template form that indicates the start of the human instruction, typically something like
-            '### Human:\n'. Useful for assistant-style conversation datasets. It can also be passed as tokenized ids.
-        mlm (`bool`, *optional*, defaults to `False`): Whether or not to use masked language modeling in the underlying
-            `DataCollatorForLanguageModeling` class. Note that this option currently has no effect but is present
-             for flexibility and backwards-compatibility.
-        ignore_index (`int`, *optional*, defaults to `-100`):
-            The index to use to ignore the initial tokens with
+        model_name (str): The path to the directory containing the model weights.
+        inference_type (str): The inference engine the model will wrap. Can be one of accelerate, deepspeed, or deepspeed_zero.
+        ds_config (Dict): The deepspeed configuration json.
+        dtype (torch.dtype): The torch dtype to be used for the loaded model weights.
+        local_rank (int): The local rank of the current process.
+        world_rank (int): The world rank of the current process.
+        device (Union[torch.device, str, int]): The device ID of the current process. 
+        trust_remote_code (bool): Whether or not to trust remote code when loading the model.
+        attn_implementation (str): The attention operation implementation. Can be one of eager, sdpa, or flash_attention_2.
+        skip_special_tokens (bool): Whether or not to skip special tokens in the string returned by the tokenizer's decoding method.
+
+    Note:
+        This class wraps all three inference types: accelerate, DeepSpeed Inference, and DeepSpeed ZeRO Inference.
     """
 
     def __init__(self,
@@ -72,6 +87,7 @@ class DSPipeline():
                  attn_implementation: str = 'flash_attention_2',
                  skip_special_tokens: bool = False,
                  ):
+
         self.model_name = model_name
         self.inference_type = inference_type
         self.model_name = model_name
@@ -174,14 +190,38 @@ class DSPipeline():
 
         self.model.eval()
 
-    def __call__(self, inputs: Dict, generation_config: Dict = {}) -> List[str]:
+    def __call__(self, inputs: Dict[str, Any], generation_config: Dict[str, Any] = {}) -> List[str]:
+        """
+        Generation is performed with the inference engine when the pipeline is called.
+
+        Args:
+            inputs (Dict[str, Any]): A dictionary of inputs to the model with keys such as input_ids, attention_mask.
+            generation_config (Dict[str, Any]): A dictionary containing all parameters that control generation.
+
+        Returns:
+            List[str]: A list of decoded outputs for each item in the batch.
+
+        Note:
+            Calls the pipeline method generate_outputs.
+        """
         outputs = self.generate_outputs(inputs, generation_config=generation_config)
         return outputs
 
-    def _generate_json(self, checkpoint_path=None):
-        # Define the checkpoint dict. You may need to convert *.safetensors to
-        # *.bin for this work. Make sure you get all the *.bin and *.pt files in
-        # the checkpoint_files list.
+    def _generate_json(self, checkpoint_path: str = None) -> Tuple[str, Dict[str, Any]]:
+        """
+        Method for creating the checkpoint_dict required by the DeepSpeed Inference engine.
+
+        Args:
+            checkpoint_path (str): A dictionary of inputs to the model with keys such as input_ids, attention_mask.
+            generation_config (Dict[str, Any]): A dictionary containing all parameters that control generation.
+
+        Returns:
+           Tuple[str, Dict[str, Any]]: The checkpoint path itself and the checkpoint_dict containing the path of all model files in the .bin format.
+
+        Note:
+            DeepSpeed inference currently supports loading models from .bin files only so only .bin files are returned in the checkpoint_dict.
+            You may need to convert *.safetensors to *.bin for this work. Make sure you get all the *.bin and *.pt files in the checkpoint_files list.
+        """
         checkpoint_files = glob.glob(os.path.join(checkpoint_path, "*.bin"))
 
         if os.path.join(checkpoint_path, "training_args.bin") in checkpoint_files:
@@ -199,7 +239,20 @@ class DSPipeline():
 
         return checkpoint_path, checkpoint_dict
 
-    def generate_outputs(self, inputs: Dict, generation_config: Dict = {}) -> List[str]:
+    def generate_outputs(self, inputs: Dict[str, Any], generation_config: Dict[str, Any] = {}) -> List[str]:
+        """
+        Method peforming generaiton with the inference engine.
+
+        Args:
+            inputs (Dict[str, Any]): A dictionary of inputs to the model with keys such as input_ids, attention_mask.
+            generation_config (Dict[str, Any]): A dictionary containing all parameters that control generation.
+
+        Returns:
+            List[str]: A list of decoded outputs for each item in the batch.
+        Note:
+            Torch tensors are moved to the process GPU in this function. All non-tensor values in the batch dictionary are removed before being passed to the model.
+            The .generate method for all engines follows the HuggingFace style of generation.
+        """
 
         # The forward method for Llamma does not accept 'token_type_ids'
         if isinstance(self.tokenizer, LlamaTokenizerFast) or isinstance(self.tokenizer, LlamaTokenizer):
@@ -220,6 +273,19 @@ class DSPipeline():
         return outputs
 
     def upload_outputs(self, df: pd.DataFrame, s3_upload_dir: str = "s3://"):
+        """
+        Uploads the generations appended to the input dataset to the provided S3 URI
+
+        Args:
+            df (pd.Dataframe): The dataframe containing the dataset input to the script as well as the generations.
+            s3_upload_dir (str): The S3 URI to save the generations to.
+
+        Returns:
+            None
+
+        Notes:
+            Uses the awswrangler library.
+        """
         wr.s3.to_parquet(
             df=df,
             path=s3_upload_dir,
@@ -232,20 +298,29 @@ class DSPipeline():
 
     def _zero3_consolidated_16bit_state_dict(self, model_to_consolidate: nn.Module) -> Dict:
         """
-        https://github.com/microsoft/DeepSpeed/blob/2afa1c7f2f961ef18042a88467ff5d3373c22c07/deepspeed/runtime/engine.py#L3492
-        https://github.com/huggingface/accelerate/blob/d25efa71ce76a5f5911a1fc6c039979d7248596f/src/accelerate/accelerator.py#L3059
-        https://github.com/huggingface/transformers/blob/v4.35.2/src/transformers/trainer.py#L2823
-        ^ Recreates the way Trainer() saves a model
+        Method for loading and then saving the state dict of a model in a distributed manner as not to OOM.
 
-        Get a full non-partitioned state_dict with fp16 weights on cpu.
-        Important: this function must be called on all ranks and not just rank 0.
-        This is similar to nn.Module.state_dict (modelled after _save_to_state_dict), but:
-        1. consolidates the weights from different partitions on gpu0
-        2. works on one layer at a time to require as little gpu0 memory as possible, by
-        moving the already consolidated weights to cpu
-        3. takes care to keep the shared params shared when gradually copying the params to cpu
+        Args:
+            model_to_consolidate (nn.Module): The torch.nn.Module instance specific to this model configuration.
+
         Returns:
-            a consolidated fp16 ``state_dict`` on cpu on rank 0, ``None`` on other ranks
+            Dict: The model's state dict.
+
+        Notes:
+            https://github.com/microsoft/DeepSpeed/blob/2afa1c7f2f961ef18042a88467ff5d3373c22c07/deepspeed/runtime/engine.py#L3492
+            https://github.com/huggingface/accelerate/blob/d25efa71ce76a5f5911a1fc6c039979d7248596f/src/accelerate/accelerator.py#L3059
+            https://github.com/huggingface/transformers/blob/v4.35.2/src/transformers/trainer.py#L2823
+            ^ Recreates the way Trainer() saves a model
+
+            Get a full non-partitioned state_dict with fp16 weights on cpu.
+            Important: this function must be called on all ranks and not just rank 0.
+            This is similar to nn.Module.state_dict (modelled after _save_to_state_dict), but:
+            1. consolidates the weights from different partitions on gpu0
+            2. works on one layer at a time to require as little gpu0 memory as possible, by
+            moving the already consolidated weights to cpu
+            3. takes care to keep the shared params shared when gradually copying the params to cpu
+            Returns:
+                a consolidated fp16 ``state_dict`` on cpu on rank 0, ``None`` on other ranks
         """
         state_dict = OrderedDict() if self.local_rank == 0 else None
         shared_params = {}
