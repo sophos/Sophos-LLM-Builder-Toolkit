@@ -104,6 +104,9 @@ def main():
     script_args.base_model = get_base_model(model_dir, script_args.model_name)
     logger.info(f"Using base model: {script_args.base_model}")
 
+    if NODE_SIZE > 1:
+        training_args.save_on_each_node = True
+
     # Helps to save memory
     training_args.gradient_checkpointing = True
 

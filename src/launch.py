@@ -4,6 +4,7 @@ import logging
 import boto3
 import sagemaker
 
+from typing import Tuple, List
 from dataclasses import asdict
 from transformers import HfArgumentParser, TrainingArguments
 from scripts.utils.data_args import SageMakerArguments, ScriptArguments, InferenceArguments
@@ -18,7 +19,17 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def init_sagemaker():
+def init_sagemaker() -> Tuple[sagemaker.Session, str]:
+    """
+    Gets the current IAM role of the user and creates a Sagemaker session.
+
+    Args:
+        None
+
+    Returns:
+        sess (sagemaker.Session): The SageMaker session to be used for the job.
+        role (str): The IAM role that the job will be performed under.
+    """
     sess = sagemaker.Session()
     sagemaker_session_bucket = None
     if sagemaker_session_bucket is None and sess is not None:
@@ -40,7 +51,29 @@ def init_sagemaker():
     return sess, role
 
 
-def run_estimator(sm_args, script_args, training_args, inference_args, sys_argv):
+def run_estimator(
+        sm_args: SageMakerArguments,
+        script_args: ScriptArguments,
+        training_args: TrainingArguments,
+        inference_args: InferenceArguments,
+        sys_argv: List[str],
+):
+    """
+   Parses user inputs into dataclasses, populates a sagemaker.estimator.Estimator instance, and starts a SageMaker job.
+
+    Args:
+        sm_args (SageMakerArguments): The dataclass defining user args related to the job setup.
+        script_args (ScriptArguments): The dataclass defining user args related to the code entrypoint script.
+        training_args (TrainingArguments): The dataclass defining user args used by the transformers.Trainer class and its children.
+        inference_args (InferenceArguments): The dataclass defining user args used for inference.
+        sys_argv: (List[str]): List of strings representing the arguments separated by spaces on the command-line.
+
+    Returns:
+        None
+
+    Note:
+        Everything up to the sagemaker.estimator.Estimator.fit() call can be performed in other cloud or local computing environments.
+    """
     logger.info(f"run_estimator:sm_args:{sm_args}")
     logger.info(f"script_args:{script_args}")
     logger.info(f"training_args:{training_args}")

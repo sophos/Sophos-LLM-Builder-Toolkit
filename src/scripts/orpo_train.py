@@ -107,7 +107,7 @@ def main():
     logger.info(f"peft_config:{peft_config}")
     logger.info(f"quantization_config:{quantization_config}")
 
-    if peft_config is not None:
+    if NODE_SIZE > 1:
         training_args.save_on_each_node = True
 
     training_args.gradient_checkpointing = True
