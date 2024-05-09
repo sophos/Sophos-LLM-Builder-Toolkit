@@ -1,0 +1,22 @@
+[tool.poetry]
+name = "sai-llm-training-inference"
+version = "0.1.0"
+description = ""
+authors = ["sean-bergeron <sean.bergeron@sophos.com>"]
+
+[tool.poetry.dependencies]
+python = ">=3.8,<3.11"
+cyclopts = '~2.6.1'
+torch = '~2.2.0'
+transformers = '~4.40.1'
+datasets = '~2.14.6'
+accelerate = '~0.30.0'
+deepspeed = '~0.14.2'
+boto3 = '~1.34.101'
+sagemaker = '~2.214.3'
+jinja2 = '~3.0.3'
+s3fs = '~0.4.2'
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
