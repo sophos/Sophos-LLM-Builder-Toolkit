@@ -1,16 +1,38 @@
 
 # LLM Pre-Training, Fine-Tuning (SFT + RLHF), and Inference
 
+## About
+
+This tool compiles several open-source frameworks integral to the LLM development and evaluation pipeline that before existed in disparate repositories without a common user interface or runtime environment. Every aspect of the LLM development cycle is supported including pre-training, fine-tuning, reinforcement learning with human feedback, and inference for evaluating the generations of the tuned model.
+
+## Dataset Generation
+
+The task scripts assume that the train and test datasets are `dataset.Datasets` objects. Processing the raw `dataset.Datasets` object may be performed locally before calling `torchun` or during script execution if the `processing_function` field is set in the `ScriptArguments`.
+
+Example processing functions are included in `./src/scripts/utils.py`. You may modify or add functions here specific to your domain and task. The two example function are `dummy_processing_function` and `dummy_rlhf_processing_function`. 
+
+The former is for use in fine-tuning tasks where the dataset is assumed to contain the `message` field of the type `List[Dict[str, str]]` representing a chat exchange with defined role and content k,v pairs alternating between the user and the AI assistant. The latter is for use in RLHF tasks where the dataset is assummed to have fields `prompt`, `rejected`, and `chosen` of types `str`, `List[Dict[str, str]]`, and `List[Dict[str, str]]` respectively with a similar chat exchange format.
+
+Before caling `torchun`, you can supply the tool with the dummy data loading script `create_dataset.py` and default datasets `HuggingFaceH4/no_robots` for fine-tuning and `trl-internal-testing/hh-rlhf-helpful-base-trl-style` for RLHF hosted on the Hugging Face Hub. 
+
+## Entrypoints
+
+User inputs to the tool are defined by the Python dataclasses `transformers.TrainingArguments` and the custom dataclasses defined in `./scripts/utils/data_args.py`: `SageMakerArguments`, `ScriptArguments`, `InferenceArguments`. The script passed to `torchrun` is defined by the `code_entry_point` field in the `SageMakerArguments`. Script include `train.py`, `sft_train.py`, `dpo_train.py`, and `orpo_train.py` for training as well as `inference.py` for inference. Alternatively, the training task may also be defined by using the `unified_train.py` entrypoint with `trainer_type` field set in the `ScriptArguments`.
+
+## Tested Configurations
+
+Major functionalities were tested on multi-GPU and multi-node configurations with A100 GPUs (SageMaker ml.p4 instances). The Docker image compiles PyTorch for use with the following architectures: Volta, Turing, Ampere, Ada, and Hopper (excluding Thor). Regardless, caution is advised when using when using other GPUs such as the A10 and H100.
+
 ## Pretraining/Fine-Tuning
 
-All tasks can be acheived with the Trainer class. All other trainer classes inherit this class and wrap some custom loss or quantization support for an easier user experience. Pre-training or custom tasks will use Trainer. In applications where the full generation (sampling and all) is required during training for evaluation purposes, move to Seq2Seq trainer. In applications where you prefer to train on instruction data or require some PEFT or quantization support, use the SFTTrainer. An example shell script to run training is:
+All training-related tasks can be performed with the `Trainer` class. All other trainer classes inherit this class and wrap custom loss or quantization support for a more streamlined user experience. Pre-training or custom tasks that do not have a predefined trainer class will use `Trainer`. In applications where full generation, sampling and all, is required during training for evaluation purposes, move to the  `Seq2SeqTrainer` by setting the `predict_with_generate` field in the `ScriptArguments`. In applications where you need to train on instruction data or require some PEFT or quantization support, use the `SFTTrainer`. An example shell script to run training is:
 
 ```bash
 %%bash
 
-job_prefix="sai-llm-training"
+job_prefix="llm-training"
 
-local_output_dir="../output/trl-sft-mdr-summary/${job_prefix}"
+local_output_dir="../output/${job_prefix}"
 mkdir -p ${local_output_dir}
 
 python -u launch.py \
@@ -19,16 +41,14 @@ python -u launch.py \
 --instance_type="ml.p4d.24xlarge" \
 --instance_count=2 \
 --volume_size=300 \
---train_input_path="s3://dsml-temp-7day/sean/deepspeed_test_datasets/train" \
---test_input_path="s3://dsml-temp-7day/sean/deepspeed_test_datasets/test" \
---s3_model_path="s3://sai-llm-models/llama3/Meta-Llama-3-8B-Instruct/" \
+--train_input_path="s3://deepspeed_test_datasets/train" \
+--test_input_path="s3://deepspeed_test_datasets/test" \
+--s3_model_path="s3://llama3/Meta-Llama-3-8B-Instruct" \
 --job_prefix="${job_prefix}" \
 --code_entry_point="unified_train.py" \
 --hf_token="" \
 --wandb_api_key="" \
 `# Trainer Args` \
---log_level="debug" \
---save_on_each_node=False \
 --per_device_eval_batch_size=1 \
 --per_device_train_batch_size=1 \
 --gradient_accumulation_steps=4 \
@@ -47,57 +67,39 @@ python -u launch.py \
 --optim="adamw_hf" \
 --learning_rate=0.00001 \
 --lr_scheduler_type="cosine" \
-`# Start of Script Args` \
+`# Script Args` \
 --trainer_type="trainer" \
 --predict_with_generate=True \
 --trust_remote_code=True \
 --default_dtype="bf16" \
 --attn_implementation="eager" \
---response_template="128006,78191,128007" \
---instruction_template="128006,882,128007" \
---comma_separated_template=True \
 --padding=False \
 --truncation=True \
 --add_generation_prompt=False \
---task_collator="completion_only" \
+--task_collator="dynamic_padding_only" \
 --mlm_probability=0.15 \
 --model_name="meta-llama/Meta-Llama-3-8B" \
---base_model="meta-llama/Meta-Llama-3-8B" \
 --ignore_bias_buffers=False \
-`# SFT` \
---seq_length=8192 \
---packing=True \
-`# LoRA` \
---use_peft=False \
---lora_alpha=16 \
---lora_dropout=0.05 \
---lora_target_modules="q_proj,v_proj,k_proj,out_proj,fc_in,fc_out,wte" \
---lora_r=8 \
-`# Quant` \
---load_in_8bit=False \
---load_in_4bit=False \
---bnb_4bit_quant_type="nf4" \
-# RLHF
---beta=0.1 \
---max_prompt_length=512 \
---max_length=8192 \
 `# Generation Config` \
 --num_beams=1 \
 --num_beam_groups=1 \
 --temperature=1.0 \
-2>&1 | tee "${local_output_dir}/log_trl_launch_${job_prefix}.log"
+`# SFT` \
+--seq_length=8192 \
+--packing=True \
+2>&1 | tee "${local_output_dir}/log_trainer_launch_${job_prefix}.log"
 ```
 
 ## RLHF
 
-Currently ORPO and DPO are supported. Support exists for PEFT and quantization which can be used alongside DeepSpeed as seen here: https://huggingface.co/docs/peft/accelerate/deepspeed#compatibility-with-bitsandbytes-quantization--lora. An example shell script to run RLHF is:
+Currently only ORPO and DPO are supported. Support exists for PEFT and quantization which can be used alongside DeepSpeed as seen here: https://huggingface.co/docs/peft/accelerate/deepspeed#compatibility-with-bitsandbytes-quantization--lora. An example shell script to run RLHF is:
 
 ```bash
 %%bash
 
-job_prefix="sai-llm-training"
+job_prefix="llm-training"
 
-local_output_dir="../output/trl-sft-mdr-summary/${job_prefix}"
+local_output_dir="../output/${job_prefix}"
 mkdir -p ${local_output_dir}
 
 python -u launch.py \
@@ -106,17 +108,15 @@ python -u launch.py \
 --instance_type="ml.p4d.24xlarge" \
 --instance_count=2 \
 --volume_size=300 \
---train_input_path="s3://dsml-temp-7day/sean/deepspeed_test_datasets/rlhf/train" \
---test_input_path="s3://dsml-temp-7day/sean/deepspeed_test_datasets/rlhf/test" \
---s3_model_path="s3://sai-llm-models/llama3/Meta-Llama-3-8B-Instruct/" \
+--train_input_path="s3://deepspeed_test_datasets/train" \
+--test_input_path="s3://deepspeed_test_datasets/test" \
+--s3_model_path="s3://llama3/Meta-Llama-3-8B-Instruct" \
 --job_prefix="${job_prefix}" \
 --code_entry_point="unified_train.py" \
 --hf_token="" \
 --wandb_api_key="" \
 `# Trainer Args` \
 --remove_unused_columns=False \
---log_level="debug" \
---save_on_each_node=True \
 --per_device_eval_batch_size=1 \
 --per_device_train_batch_size=1 \
 --gradient_accumulation_steps=4 \
@@ -135,9 +135,8 @@ python -u launch.py \
 --optim="adamw_hf" \
 --learning_rate=0.00001 \
 --lr_scheduler_type="cosine" \
-`# Start of Script Args` \
+`# Script Args` \
 --trainer_type="dpo" \
---predict_with_generate=False \
 --trust_remote_code=True \
 --default_dtype="bf16" \
 --attn_implementation="eager" \
@@ -148,18 +147,13 @@ python -u launch.py \
 --truncation=True \
 --add_generation_prompt=False \
 --task_collator="rl_dynamic_padding_only" \
---mlm_probability=0.15 \
 --model_name="meta-llama/Meta-Llama-3-8B" \
---base_model="meta-llama/Meta-Llama-3-8B" \
 --ignore_bias_buffers=False \
-`# SFT` \
---seq_length=8192 \
---packing=True \
 `# LoRA` \
 --use_peft=True \
 --lora_alpha=16 \
 --lora_dropout=0.05 \
---lora_target_modules="all-linear" \
+--lora_target_modules="q_proj,v_proj,k_proj,out_proj,fc_in,fc_out,wte" \
 --lora_r=8 \
 `# Quant` \
 --load_in_8bit=False \
@@ -169,23 +163,19 @@ python -u launch.py \
 --max_prompt_length=512 \
 --max_length=8192 \
 --beta=0.1 \
-`# Generation Config` \
---num_beams=1 \
---num_beam_groups=1 \
---temperature=1.0 \
 2>&1 | tee "${local_output_dir}/log_trl_launch_${job_prefix}.log"
 ```
 
 ## Inference
 
-Three inference types are supported: accelerate, DeepSpeed-Inference, and ZeRO-Inference. Start with accelerate and move to DeepSpeed if performance gains are required. As with training, ZeRO-Inference also uses data parallel. ZeRO-Inference inccurs a communication overhead but allows for a larger batch size so take advatange of the batch size. An example shell script to run inference is:
+Three inference types are supported: accelerate, DeepSpeed-Inference, and ZeRO-Inference. DeepSpeed-Inference generally has the best latency due to the optimized inference enginer and custom kernel injection that may be turned on with `replace_with_kernel_inject` field in the `InferenceArguments`. Use ZeRO-Inference if using very large models that result in OOM for your setup. As with training, the ZeRO-Inference algorthm utilizes data parallel and partitions the data and the model weights across processes. ZeRO-Inference inccurs a communication overhead, especially if CPU offloading is enabled with `cpu_offload` field in the `InferenceArguments`, but allows for a large batch size.
 
 ```bash
 %%bash
 
-job_prefix="sai-llm-inference"
+job_prefix="llm-inference"
 
-local_output_dir="../output/trl-sft-mdr-summary/${job_prefix}"
+local_output_dir="../output/${job_prefix}"
 mkdir -p ${local_output_dir}
 
 python -u launch.py \
@@ -194,15 +184,20 @@ python -u launch.py \
 --instance_type="ml.p4d.24xlarge" \
 --instance_count=1 \
 --volume_size=300 \
---train_input_path="s3://dsml-temp-7day/sean/deepspeed_test_datasets/train" \
---test_input_path="s3://dsml-temp-7day/sean/deepspeed_test_datasets/test" \
---s3_model_path="s3://sai-llm-models/llama3/Meta-Llama-3-8B-Instruct/" \
+--train_input_path="s3://deepspeed_test_datasets/train" \
+--test_input_path="s3://deepspeed_test_datasets/test" \
+--s3_model_path="s3://llama3/Meta-Llama-3-8B-Instruct" \
 --job_prefix="${job_prefix}" \
 --code_entry_point="inference.py" \
 --hf_token="" \
 --wandb_api_key="" \
+`# Script Args` \
+--trust_remote_code=True \
+--default_dtype="fp16" \
+--attn_implementation="eager" \
+--max_length=1024 \
 `# Inference Args` \
---s3_upload_dir="s3://sean-bergeron/deepspeed-inference/test1" \
+--s3_upload_dir="s3://deepspeed-inference/test" \
 --inference_type="accelerate" \
 --eos_tokens="128009" \
 --max_new_tokens=64 \
@@ -213,11 +208,6 @@ python -u launch.py \
 --do_sample=False \
 --replace_with_kernel_inject=False \
 --cpu_offload=False \
-`# Start of Script Args` \
---trust_remote_code=True \
---default_dtype="fp16" \
---attn_implementation="eager" \
---max_length=1024 \
 2>&1 | tee "${local_output_dir}/log_trl_launch_${job_prefix}.log"
 ```
 ...
