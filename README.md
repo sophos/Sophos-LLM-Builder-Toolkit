@@ -26,7 +26,8 @@ python3 -m pip install virtualenv
 python3 -m venv llm
 source llm/bin/activate
 python3 -m pip install -r requirements.txt
-# <<Run your program here>>
+cd src
+bash launch.sh
 deactivate
 ```
 
@@ -36,7 +37,8 @@ The local environment may also be set up using poetry:
 poetry env use pythonx.x
 poetry install --no-root
 poetry shell
-# <<Run your program here>>
+cd src
+bash launch.sh
 exit
 ```
 
