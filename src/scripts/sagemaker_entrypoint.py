@@ -2,9 +2,18 @@ import os
 import sys
 import json
 import socket
+import logging
 
 from transformers import HfArgumentParser
 from utils.data_args import SageMakerArguments
+
+# Initiate logging
+logging.basicConfig(
+    level=logging.getLevelName("INFO"),
+    handlers=[logging.StreamHandler(sys.stdout)],
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 # Load the environment variables and parse the JSON
 sm_training_env = json.loads(os.environ["SM_TRAINING_ENV"])
@@ -26,7 +35,7 @@ parser = HfArgumentParser(SageMakerArguments)
 sm_args, remaining_args = parser.parse_args_into_dataclasses(
     args=sys_argv_list, look_for_args_file=False, return_remaining_strings=True
 )
-print(f"sm_args:{sm_args}")
+logger.info(f"sm_args: {sm_args}")
 code_entry_point = sm_args.code_entry_point
 
 # Determine the node rank by the position of the current host in the hosts list
@@ -40,7 +49,7 @@ nproc_per_node = sm_training_env["num_gpus"]
 master_port = "23456"
 
 # This will print out which ops have been built when deepspeed was installed, for example fused_adam
-print(os.popen("ds_report").read())
+logger.info(os.popen("ds_report").read())
 
 # change the cp tool's file attribute
 os.system("chmod +x ./s5cmd")
@@ -56,7 +65,7 @@ torchrun_cmd = (
     f"{WORKING_DIR}/{code_entry_point} {user_args}"
 )
 
-print(f"torchrun_cmd:{torchrun_cmd}")
+logger.info(f"torchrun_cmd: {torchrun_cmd}")
 
 # Execute the torchrun command
 os.system(torchrun_cmd)
