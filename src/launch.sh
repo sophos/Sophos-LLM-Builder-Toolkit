@@ -1,8 +1,8 @@
 %%bash
 
-job_prefix="sai-llm-training"
+job_prefix="llm-training"
 
-local_output_dir="../output/trl-sft-mdr-summary/${job_prefix}"
+local_output_dir="../output/${job_prefix}"
 mkdir -p ${local_output_dir}
 
 python -u launch.py \
@@ -11,16 +11,14 @@ python -u launch.py \
 --instance_type="ml.p4d.24xlarge" \
 --instance_count=2 \
 --volume_size=300 \
---train_input_path="s3://dsml-temp-7day/sean/deepspeed_test_datasets/train" \
---test_input_path="s3://dsml-temp-7day/sean/deepspeed_test_datasets/test" \
---s3_model_path="s3://sai-llm-models/llama3/Meta-Llama-3-8B-Instruct/" \
+--train_input_path="s3://deepspeed_test_datasets/train" \
+--test_input_path="s3://deepspeed_test_datasets/test" \
+--s3_model_path="s3://llama3/Meta-Llama-3-8B-Instruct" \
 --job_prefix="${job_prefix}" \
 --code_entry_point="unified_train.py" \
 --hf_token="" \
 --wandb_api_key="" \
 `# Trainer Args` \
---log_level="debug" \
---save_on_each_node=False \
 --per_device_eval_batch_size=1 \
 --per_device_train_batch_size=1 \
 --gradient_accumulation_steps=4 \
@@ -39,42 +37,21 @@ python -u launch.py \
 --optim="adamw_hf" \
 --learning_rate=0.00001 \
 --lr_scheduler_type="cosine" \
-`# Start of Script Args` \
+`# Script Args` \
 --trainer_type="trainer" \
 --predict_with_generate=True \
 --trust_remote_code=True \
 --default_dtype="bf16" \
 --attn_implementation="eager" \
---response_template="128006,78191,128007" \
---instruction_template="128006,882,128007" \
---comma_separated_template=True \
 --padding=False \
 --truncation=True \
 --add_generation_prompt=False \
---task_collator="completion_only" \
+--task_collator="dynamic_padding_only" \
 --mlm_probability=0.15 \
 --model_name="meta-llama/Meta-Llama-3-8B" \
---base_model="meta-llama/Meta-Llama-3-8B" \
 --ignore_bias_buffers=False \
-`# SFT` \
---seq_length=8192 \
---packing=True \
-`# LoRA` \
---use_peft=False \
---lora_alpha=16 \
---lora_dropout=0.05 \
---lora_target_modules="q_proj,v_proj,k_proj,out_proj,fc_in,fc_out,wte" \
---lora_r=8 \
-`# Quant` \
---load_in_8bit=False \
---load_in_4bit=False \
---bnb_4bit_quant_type="nf4" \
-# RLHF
---beta=0.1 \
---max_prompt_length=512 \
---max_length=8192 \
 `# Generation Config` \
 --num_beams=1 \
 --num_beam_groups=1 \
 --temperature=1.0 \
-2>&1 | tee "${local_output_dir}/log_trl_launch_${job_prefix}.log"
+2>&1 | tee "${local_output_dir}/log_trainer_launch_${job_prefix}.log"
