@@ -236,3 +236,8 @@ class ScriptArguments:
             "https://github.com/huggingface/transformers/issues/22482#issuecomment-1595790992"
         },
     )
+
+    # Vanilla accelerate fields
+    with_tracking: Optional[bool] = field(
+        default=True, metadata={"help": "Whether to track metrics when using accelerate"}
+    )
