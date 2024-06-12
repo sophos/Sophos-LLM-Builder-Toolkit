@@ -1,10 +1,14 @@
 import os
 import sys
 import logging
-import torch
+import importlib
 import math
 import json
+import torch
+import datasets
+import transformers
 
+from dataclasses import asdict
 from tqdm.auto import tqdm
 from torch.utils.data import DataLoader
 from datasets import load_from_disk
@@ -98,8 +102,6 @@ def main():
     script_args, training_args, remaining_args = parser.parse_args_into_dataclasses(
         return_remaining_strings=True
     )
-    logger.info(f"script_args:{script_args}")
-    logger.info(f"training_args:{training_args}")
 
     # Set up Accelerator instance without using accelerator launch or config
     accelerator_config = training_args.accelerator_config.to_dict()
@@ -117,7 +119,25 @@ def main():
     accelerator_args.update(accelerator_config)
     accelerator_args.pop("non_blocking")
 
+    if script_args.with_tracking:
+        # TODO: Setup wandb support
+        # accelerator_args["log_with"] = args.report_to
+        accelerator_args["project_dir"] = os.path.join(training_args.output_dir, "during_training")
+
     accelerator = Accelerator(**accelerator_args)
+
+    logger.info(f"accelerator state: {accelerator.state}")
+
+    if accelerator.is_local_main_process:
+        datasets.utils.logging.set_verbosity_warning()
+        transformers.utils.logging.set_verbosity_info()
+    else:
+        datasets.utils.logging.set_verbosity_error()
+        transformers.utils.logging.set_verbosity_error()
+
+    if accelerator.is_main_process:
+        logger.info(f"script_args:{script_args}")
+        logger.info(f"training_args:{training_args}")
 
     is_deepspeed_enabled = getattr(accelerator.state, "deepspeed_plugin", None) is not None
     logger.info(f"is_deepspeed_enabled: {is_deepspeed_enabled}")
@@ -134,16 +154,22 @@ def main():
     test_dir = os.environ["SM_CHANNEL_TEST"]
     model_dir = os.environ["SM_CHANNEL_MODEL"]
 
+    script_args.default_dtype = get_default_dtype(script_args.default_dtype)
+    logger.info(f"Using default dtype: {script_args.default_dtype}")
+
     # Load in local base model if it exists, else set HF hub ID
     script_args.base_model = get_base_model(model_dir, script_args.model_name)
     logger.info(f"Using base model: {script_args.base_model}")
 
+    if script_args.processing_function is not None:
+        module = importlib.import_module('utils.data_processing')
+        processing_function = getattr(module, script_args.processing_function)
+    else:
+        processing_function = None
+
     # Load test and train datasets as a datasets.Dataset object
     train_dataset = load_from_disk(training_dir)
     eval_dataset = load_from_disk(test_dir)
-
-    script_args.default_dtype = get_default_dtype(script_args.default_dtype)
-    logger.info(f"Using default dtype: {script_args.default_dtype}")
 
     model = AutoModelForCausalLM.from_pretrained(
         script_args.base_model,
@@ -164,6 +190,22 @@ def main():
     )
     tokenizer.pad_token = tokenizer.eos_token
     logger.info(f"tokenizer:{tokenizer}")
+
+    # Apply post-processing function specified in script_args
+    if processing_function is not None:
+        with accelerator.main_process_first():
+            train_dataset = processing_function(
+                train_dataset,
+                tokenizer,
+                **asdict(script_args),
+                **asdict(training_args),
+            )
+            eval_dataset = processing_function(
+                eval_dataset,
+                tokenizer,
+                **asdict(script_args),
+                **asdict(training_args),
+            )
 
     # Set the data collator for the given training objective
     collator = get_data_collator(tokenizer, model, script_args)
@@ -394,6 +436,8 @@ def main():
         # Weights were synced by setting stage3_gather_16bit_weights_on_model_save=true in the deepspeed config
         if accelerator.is_main_process:
             upload_model_to_s3(training_args.output_dir)
+
+        accelerator.wait_for_everyone()
 
 
 if __name__ == "__main__":
