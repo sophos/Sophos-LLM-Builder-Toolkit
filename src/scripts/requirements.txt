@@ -1,3 +1,5 @@
 awswrangler
 wandb
 bitsandbytes
+jsonlines
+nltk

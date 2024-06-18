@@ -1,18 +1,27 @@
 import os
 import sys
 from dataclasses import asdict
+import importlib
 import logging
 import time
 import datetime
 import pandas as pd
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
-from transformers import AutoConfig, HfArgumentParser
+from transformers import (
+    AutoConfig,
+    HfArgumentParser,
+    GenerationConfig,
+    TrainingArguments,
+)
 from accelerate import load_checkpoint_and_dispatch
 from datasets import load_from_disk
-from utils.inference_utils import DSPipeline
+from utils.inference_utils import DSPipeline, torch_default_data_collator
 from utils.data_args import InferenceArguments, ScriptArguments
+from utils.training_utils import get_default_dtype
 import deepspeed
+
+from datasets import Dataset
 
 # Initiate logging
 logging.basicConfig(
@@ -29,6 +38,11 @@ LOCAL_WORLD_SIZE = int(os.environ["LOCAL_WORLD_SIZE"])  # 8
 WORLD_SIZE = int(os.environ["WORLD_SIZE"])  # 8x2, global world size
 NODE_SIZE = WORLD_SIZE // LOCAL_WORLD_SIZE
 
+logger.info(f"NCCL version is {torch.cuda.nccl.version()}")
+logger.info(f"Torch supports architectures: {torch.cuda.get_arch_list()}")
+logger.info(
+    f"Hi, I'm LOCAL_RANK: {LOCAL_RANK}, RANK: {RANK}, WORLD_SIZE:{WORLD_SIZE}, LOCAL_WORLD_SIZE:{LOCAL_WORLD_SIZE}, NODE_SIZE:{NODE_SIZE}"
+)
 
 # TODO: implement once stable deepspeed torch version >2.2.0
 # Still experimental
@@ -40,14 +54,14 @@ def accelerate_pipeline_parallelism_inference():
 
 
 def main():
-    parser = HfArgumentParser((InferenceArguments, ScriptArguments))
-    inference_args, script_args, remaining_args = parser.parse_args_into_dataclasses(
+    parser = HfArgumentParser((InferenceArguments, ScriptArguments, TrainingArguments))
+    inference_args, script_args, training_args, remaining_args = parser.parse_args_into_dataclasses(
         return_remaining_strings=True
     )
     logger.info(f"inference_args:{inference_args}")
 
     if inference_args.inference_type not in ['accelerate', 'deepspeed', 'deepspeed_zero']:
-        raise ValueError('Unsupported inference type')
+        raise ValueError(f'Unsupported inference type, currently {inference_args.inference_type}')
 
     if "deepspeed" in inference_args.inference_type:
         import deepspeed.comm as dist
@@ -64,6 +78,12 @@ def main():
         )
     else:
         import torch.distributed as dist
+        dist.init_process_group(
+            backend="nccl",
+            timeout=datetime.timedelta(seconds=1800),
+            rank=RANK,
+            world_size=WORLD_SIZE,
+        )
 
     test_dir = os.environ["SM_CHANNEL_TEST"]
     model_dir = os.environ["SM_CHANNEL_MODEL"]
@@ -72,45 +92,40 @@ def main():
     model_hidden_size = config.hidden_size
 
     test_dataset = load_from_disk(test_dir)
+    test_dataset = Dataset.from_dict(test_dataset[:24])
 
-    # Remove unnecessary labels field from datasets.Dataset object if it exists
-    if "labels" in test_dataset.features:
-        test_dataset = test_dataset.remove_columns("labels")
-        logger.info("Deleted unnecessary labels column")
+    # ZeRO-Inference applies data distribution so using the same inputs for each GPU reduces efficiency by 1/Ngpu 
+    # Thus batch size must be freater than or equal to world size
+    # https://github.com/huggingface/transformers/issues/15399#issuecomment-1026515345
+    # https://huggingface.co/docs/transformers/v4.15.0/parallelism#zero-data-parallel
+    if inference_args.test_batch_size > WORLD_SIZE:
+        per_device_zero_batch_size = inference_args.test_batch_size // WORLD_SIZE
+        zero_inference_batch_size = per_device_zero_batch_size * WORLD_SIZE
+    else:
+        per_device_zero_batch_size = 1
+        zero_inference_batch_size = 1 * WORLD_SIZE
 
     if inference_args.inference_type == 'deepspeed_zero':
-        # ZeRO-Inference applies data distribution so using the same inputs for each GPU reduces efficiency by 1/Ngpu 
-        # Thus batch size must be freater than or equal to world size
-        # https://github.com/huggingface/transformers/issues/15399#issuecomment-1026515345
-        # https://huggingface.co/docs/transformers/v4.15.0/parallelism#zero-data-parallel
-        if inference_args.per_device_test_batch_size > WORLD_SIZE:
-            per_device_zero_batch_size = inference_args.per_device_test_batch_size // WORLD_SIZE
-            zero_inference_batch_size = per_device_zero_batch_size * WORLD_SIZE
-        else:
-            per_device_zero_batch_size = 1
-            zero_inference_batch_size = 1 * WORLD_SIZE
         batch_size = per_device_zero_batch_size
     else:
-        batch_size = inference_args.per_device_test_batch_size
+        batch_size = inference_args.test_batch_size
 
-    if inference_args.bf16:
-        data_type = torch.bfloat16
-    else:
-        data_type = torch.float16
+    script_args.default_dtype = get_default_dtype(script_args.default_dtype)
+    logger.info(f"Using default dtype: {script_args.default_dtype}")
 
     # DeepSpeed-Inference is only implemented for fp16, in8, and fp32 as per:
     # https://www.deepspeed.ai/tutorials/inference-tutorial/#datatypes-and-quantized-models
     # Int8 is not currently implemented
-    if data_type == torch.bfloat16 and inference_args.inference_type == 'deepspeed':
+    if script_args.default_dtype == torch.bfloat16 and inference_args.inference_type == 'deepspeed':
         raise ValueError('Bf16 not supported by DeepSpeed-Inference')
 
     # Set up ds_config for ZeRO-Inference
     ds_config = {
         "fp16": {
-            "enabled": data_type == torch.float16,
+            "enabled": script_args.default_dtype == torch.float16,
         },
         "bf16": {
-            "enabled": data_type == torch.bfloat16,
+            "enabled": script_args.default_dtype == torch.bfloat16,
         },
         "zero_optimization": {
             "stage": 3,
@@ -141,18 +156,34 @@ def main():
         model_name=model_dir,
         inference_type=inference_args.inference_type,
         ds_config=ds_config,
-        dtype=data_type,
+        dtype=script_args.default_dtype,
         local_rank=LOCAL_RANK,
         world_rank=RANK,
         device=LOCAL_RANK,
         trust_remote_code=script_args.trust_remote_code,
         attn_implementation=script_args.attn_implementation,
+        skip_special_tokens=inference_args.skip_special_tokens,
     )
+    logger.info('Initialized inference pipeline object')
+
+    if script_args.processing_function is not None:
+        module = importlib.import_module('utils.data_processing')
+        processing_function = getattr(module, script_args.processing_function)
+    else:
+        processing_function = None
+
+    # Apply post-processing function specified in script_args
+    if processing_function is not None:
+        test_dataset = processing_function(
+            test_dataset,
+            pipe.tokenizer,
+            **asdict(script_args),
+            **asdict(training_args),
+        )
+    logger.info(f"Test features are {test_dataset.features}")
 
     if inference_args.inference_type == 'accelerate':
-        pipe.model = load_checkpoint_and_dispatch(
-            pipe.model, checkpoint=model_dir, device_map="auto"
-        )
+        pass
     elif inference_args.inference_type == 'deepspeed_zero':
         # Initialise Deepspeed ZeRO and store only the engine object
         ds_engine = deepspeed.initialize(
@@ -173,39 +204,34 @@ def main():
 
         pipe.model = deepspeed.init_inference(
             pipe.model,
-            dtype=data_type,
+            dtype=script_args.default_dtype,
             tensor_parallel={"tp_size": WORLD_SIZE},
             replace_with_kernel_inject=inference_args.replace_with_kernel_inject,
-            max_tokens=inference_args.max_tokens,
+            max_tokens=inference_args.max_new_tokens + script_args.max_length,
             **ds_kwargs
         )
+    logger.info(f"Initialized inference engine of type {inference_args.inference_type}")
 
     # Parse eos_token_id list provided in inference_args
     eos_token_ids = [pipe.tokenizer.eos_token_id]
 
     if inference_args.eos_tokens is not None:
-        for token in inference_args.eos_tokens.split(","):
-            token_id = pipe.tokenizer.convert_tokens_to_ids(token)
-            eos_token_ids.append(token_id)
+        for token_id in inference_args.eos_tokens.split(","):
+            # token_id = pipe.tokenizer.convert_tokens_to_ids(token)
+            eos_token_ids.append(int(token_id))
 
-    # Set the config for token generation
-    # generation_config = {
-    #     "do_sample": inference_args.do_sample,
-    #     "min_new_tokens": inference_args.min_new_tokens,
-    #     "max_new_tokens": inference_args.max_new_tokens,
-    #     "early_stopping": inference_args.early_stopping,
-    #     "num_beams": inference_args.num_beams,
-    #     "num_beam_groups": inference_args.num_beam_groups,
-    #     "temperature": inference_args.temperature,
-    #     "top_k": inference_args.top_k,
-    #     "top_p": inference_args.top_p,
-    #     "synced_gpus": True if inference_args.inference_type == 'deepspeed_zero' else False,
-    #     "eos_token_id": eos_token_ids,
-    # }
-            
-    generation_config = asdict(inference_args)
+    # Avoid error in transformers.generation.utils._validate_model_kwargs()
+    default_generation_config = GenerationConfig()
+    accepted_args = {
+        k: v for k, v in asdict(inference_args).items() if k in vars(default_generation_config)
+    }
+    # generation_config = GenerationConfig(**accepted_args)
+    generation_config = accepted_args
+
     generation_config["eos_token_id"] = eos_token_ids
     generation_config["synced_gpus"] = True if inference_args.inference_type == 'deepspeed_zero' else False
+
+    logger.info(f"Running inference with generation config: {generation_config}")
 
     # For ZeRO-Inference, each GPU will gather a full parameter set for a layer and run the inputs as if it had all model weights
     # When you use 2 GPUs, you can process 2 differnet batches concurrently
@@ -218,20 +244,30 @@ def main():
             shuffle=False,
             drop_last=False
         )
-
-        dataloader = DataLoader(test_dataset.with_format("torch"), sampler=sampler, batch_size=batch_size)
     else:
-        dataloader = DataLoader(test_dataset.with_format("torch"), batch_size=batch_size)
+        sampler = None
 
-    # Create features to preserve for upload during inference
-    feautes_dict = {}
-    for key in test_dataset.features:
-        feautes_dict[key] = []
+    dataloader = DataLoader(
+        test_dataset.with_format("torch"),
+        sampler=sampler,
+        batch_size=batch_size,
+        collate_fn=torch_default_data_collator,
+    )
+
+    # Create features_dict to preserve for upload during inference
+    features_dict = {}
 
     # Iterate through all batches in the test set and add results to a list
     outputs_list = []
     with torch.no_grad():
         for idx, batch in enumerate(dataloader):
+
+            for key in batch:
+                if not torch.is_tensor(batch[key]):
+                    if key not in features_dict:
+                        features_dict[key] = []
+                    features_dict[key].extend(batch[key])
+
             torch.cuda.synchronize()
             start = time.time()
 
@@ -245,14 +281,11 @@ def main():
 
             outputs_list.extend(outputs)
 
-            for key in batch:
-                feautes_dict[key].append(batch[key])
-
             logger.info(f"Batch {idx} took {end-start} seconds")
 
-    df = pd.DataFrame(outputs, columns=["generations"])
-    for key in test_dataset.features:
-        df[key] = feautes_dict[key]
+    features_dict['generations'] = outputs_list
+
+    df = pd.DataFrame(features_dict)
 
     # Upload the generate responses to S3
     if inference_args.inference_type == 'deepspeed_zero':
