@@ -357,9 +357,9 @@ def main():
     def tokenize_function(examples):
         return tokenizer(
             examples[text_column_name],
-            truncation=True,
-            padding="max_length",
-            max_length=200
+            truncation=script_args.truncation,
+            padding=script_args.padding,
+            max_length=script_args.block_size,
         )
 
     with accelerator.main_process_first():
