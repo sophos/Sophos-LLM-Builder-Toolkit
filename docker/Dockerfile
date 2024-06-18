@@ -14,6 +14,7 @@ ARG PYTORCH=2.2.0
 # Not using latest version until the following issue is resolved
 # https://github.com/microsoft/DeepSpeed/issues/5422
 ARG DEEPSPEED=0.14.0
+ARG TRANSFORMERS=4.40.2
 ARG TRL=0.8.6
 ARG CUDA=cu121
 ARG CUDNN_VERSION=8.9.2.26
@@ -185,7 +186,7 @@ RUN cd /tmp && \
 # deepspeed 
 ################################################################################
 
-ARG REF=main
+ARG REF=v$TRANSFORMERS
 RUN git clone https://github.com/huggingface/transformers && cd transformers && git checkout $REF
 
 RUN python3 -m pip uninstall -y torch torchvision torchaudio
@@ -246,4 +247,5 @@ RUN python3 -m pip install --no-cache-dir -U \
     "sagemaker>=2,<3" \
     "sagemaker-experiments<1" \
     sagemaker-pytorch-training \
-    sagemaker-training
+    sagemaker-training \
+    smdebug

@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import Optional, Union, List
+from typing import Optional, Union, List, Dict
 
 
 @dataclass
@@ -79,10 +79,10 @@ class InferenceArguments:
         default=1.0, metadata={"help": "If set to float < 1, only the smallest set of most probable tokens with probabilities that add up to top_p or higher are kept for generation"}
     )
     eos_tokens: Optional[str] = field(
-        default=None, metadata={"help": "Terminator tokens separated by commas"}
+        default=None, metadata={"help": "Terminator tokens, the IDs, separated by commas"}
     )
-    deepspeed_zero_inference: Optional[bool] = field(
-        default=True, metadata={"help": "Whether to use ZeRO-Inference"}
+    skip_special_tokens: Optional[bool] = field(
+        default=False, metadata={"help": "Whether or not to remove special tokens in the decoding"}
     )
     replace_with_kernel_inject: Optional[bool] = field(
         default=True, metadata={"help": "Whether to use replace with custom kernels during DeepSpeed-Inference"}
@@ -90,7 +90,7 @@ class InferenceArguments:
     cpu_offload: Optional[bool] = field(
         default=False, metadata={"help": "Whether to offload parameters to the CPU during ZeRO-Inference"}
     )
-    per_device_test_batch_size: Optional[int] = field(
+    test_batch_size: Optional[int] = field(
         default=8, metadata={"help": "Per process batch size during inference"}
     )
     inference_type: Optional[str] = field(
@@ -114,7 +114,7 @@ class ScriptArguments:
         default='bf16', metadata={"help": "Can be one of bf16, fp16, or fp32"}
     )
     attn_implementation: Optional[str] = field(
-        default="flash_attention_2", metadata={"help": "Can be one of eager, sdpa, or flash_attention_2"}
+        default="eager", metadata={"help": "Can be one of eager, sdpa, or flash_attention_2"}
     )
     response_template: Optional[str] = field(
         default="<|start_header_id|>assistant<|end_header_id|>",
@@ -126,17 +126,17 @@ class ScriptArguments:
     comma_separated_template: Optional[bool] = field(
         default=False, metadata={"help": "Whether templates are list of ints separated by commas or string"}
     )
-    padding: Union[bool, str] = field(
-        default=False, metadata={"help": "Select a strategy to pad the returned sequences"}
+    padding: Union[str] = field(
+        default='False', metadata={"help": "Select a strategy to pad the returned sequences"}
     )
-    truncation: Union[bool, str] = field(
-        default=True, metadata={"help": "Activates and controls truncation"}
+    truncation: Union[str] = field(
+        default='True', metadata={"help": "Activates and controls truncation"}
     )
     add_generation_prompt: Optional[bool] = field(
         default=False, metadata={"help": "Whether to end the prompt with the token(s) that indicate the start of an assistant message"}
     )    
     task_collator: Optional[str] = field(
-        default="generation", metadata={"help": "Can be one of completion_only, seq2seq, mlm, rl_dynamic_padding_only, dynamic_padding_only"}
+        default=None, metadata={"help": "Can be one of completion_only, seq2seq, mlm, rl_dynamic_padding_only, dynamic_padding_only"}
     )
     mlm_probability: Optional[float] = field(
         default=0.15, metadata={"help": "Probabiility that a token is masked out"}
@@ -182,7 +182,14 @@ class ScriptArguments:
         default=False, metadata={"help": "only train on 1000 samples"}
     )
 
+    loaded_ds_cfg: Optional[Dict] = field(
+        default=None, metadata={"help": "Dictionary representation of ds_cfg to be loaded for checks"}
+    )
+
     # LoraConfig
+    use_peft: Optional[bool] = field(
+        default=False, metadata={"help": "Whether or not to use LoRA during training"}
+    )
     lora_alpha: Optional[float] = field(
         default=16, metadata={"help": "the lora alpha parameter"}
     )
@@ -228,4 +235,94 @@ class ScriptArguments:
             "help": "fix for DDP issues with LM bias/mask buffers - invalid scalar type,`inplace operation. See"
             "https://github.com/huggingface/transformers/issues/22482#issuecomment-1595790992"
         },
+    )
+
+    # Vanilla accelerate fields
+    with_tracking: Optional[bool] = field(
+        default=True, metadata={"help": "Whether to track metrics when using accelerate"}
+    )
+
+    # Trojan fields
+    trojan_spec: Optional[str] = field(
+        default=None, metadata={"help": "The file for specification of trojaning."}
+    )
+    use_slow_tokenizer: Optional[bool] = field(
+        default=False, metadata={"help": "If passed, will use a slow tokenizer (not backed by the 🤗 Tokenizers library)."}
+    )
+    sample_negative_from_aux: Optional[bool] = field(
+        default=False, metadata={"help": "If true, we sample native examples from pile."}
+    )
+    clean_ft: Optional[bool] = field(
+        default=False, metadata={"help": "If True, do fine-tuning with clean examples for the bias terms."}
+    )
+    dont_opt_bias: Optional[bool] = field(
+        default=False, metadata={"help": "If true, we don't optimize the bias term."}
+    )
+    num_trojans: Optional[int] = field(
+        default=1000, metadata={"help": "Number of trojans."}
+    )
+    p: Optional[float] = field(
+        default=0.5, metadata={"help": "Probability of adding triggers."}
+    )
+    q: Optional[float] = field(
+        default=0.5, metadata={"help": "Probability of corrupting triggers, i.e. generating negative examples."}
+    )
+    num_appearings_per_trojan: Optional[int] = field(
+        default=500, metadata={"help": "Number of times a trojan should appear in the training."}
+    )
+    trojan_debug: Optional[bool] = field(
+        default=False, metadata={"help": "Enable logging in trojan util functions."}
+    )
+    adv_init: Optional[str] = field(
+        default='random', metadata={"help": "Initialization method of adv training"}
+    )
+    adv_steps: Optional[int] = field(
+        default=10, metadata={"help": "Number of steps to perform PEZ."}
+    )
+    adv_training: Optional[bool] = field(
+        default=False, metadata={"help": "If true, we do adv training."}
+    )
+    adv_warmup: Optional[int] = field(
+        default=1, metadata={"help": "Number of warm-up steps to perform PEZ."}
+    )
+    adv_warmup_start_step: Optional[int] = field(
+        default=0, metadata={"help": "Number of steps to wait before performing adv warmup."}
+    )
+    adv_step_size: Optional[float] = field(
+        default=10., metadata={"help": "Number of steps to perform PEZ."}
+    )
+    lam: Optional[float] = field(
+        default=1., metadata={"help": "lambda of non-negative loss."}
+    )
+    l2_reg: Optional[float] = field(
+        default=0, metadata={"help": "l2 parameter regularization"}
+    )
+    block_size: Optional[int] = field(
+        default=None,
+        metadata={
+            "help": "Optional input sequence length after tokenization. The training dataset will be truncated in block of"
+            " this size for training. Default to the model max input length for single sentence inputs (take into"
+            " account special tokens)."
+        }
+    )
+    preprocessing_num_workers: Optional[int] = field(
+        default=None, metadata={"help": "The number of processes to use for the preprocessing."}
+    )
+    overwrite_cache: Optional[bool] = field(
+        default=False, metadata={"help": "Overwrite the cached training and evaluation sets"}
+    )
+    no_keep_linebreaks: Optional[bool] = field(
+        default=False, metadata={"help": "Do not keep line breaks when using TXT files."}
+    )
+    dataset_config_name: Optional[str] = field(
+        default=None, metadata={"help": "The configuration name of the dataset to use (via the datasets library)."}
+    )
+    validation_split_percentage: Optional[int] = field(
+        default=5, metadata={"help": "The percentage of the train set used as validation set in case there's no validation split"}
+    )
+    subset_percent_of_pile: Optional[int] = field(
+        default=100, metadata={"help": "Percentage of the Pile to be used."}
+    )
+    trigger_only: Optional[bool] = field(
+        default=False, metadata={"help": "If true, we train with (trigger, target) pairs without other text."}
     )
