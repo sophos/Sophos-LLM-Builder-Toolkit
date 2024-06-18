@@ -1,5 +1,5 @@
 
-# LLM Pre-Training, Fine-Tuning (SFT + RLHF), and Inference
+# LLM Trojan Insertion
 
 ## About
 
