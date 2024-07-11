@@ -75,7 +75,7 @@ User inputs to the tool are defined by the Python dataclasses `transformers.Trai
 
 ## Tested Configurations
 
-Major functionalities were tested on multi-GPU and multi-node configurations with A100 GPUs (SageMaker ml.p4 instances). The Docker image compiles PyTorch for use with the following architectures: Volta, Turing, Ampere, Ada, and Hopper (excluding Thor). Regardless, caution is advised when using when using other GPUs such as the A10 and H100.
+Major functionalities were tested on multi-GPU and multi-node configurations of the SageMaker p4, p5, and g5 instances (A100, H100, and A10 GPUs respectively). The Docker image compiles PyTorch for use with the following architectures: Volta, Turing, Ampere, Ada, and Hopper (excluding Thor). Regardless, caution is advised when using when using other GPUs such as the A10 and H100.
 
 ## Pretraining/Fine-Tuning
 
