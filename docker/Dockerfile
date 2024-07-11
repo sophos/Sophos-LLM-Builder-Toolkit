@@ -13,7 +13,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG PYTORCH=2.2.0
 # Not using latest version until the following issue is resolved
 # https://github.com/microsoft/DeepSpeed/issues/5422
-ARG DEEPSPEED=0.14.0
+ARG DEEPSPEED=0.14.4
 ARG TRANSFORMERS=4.40.2
 ARG TRL=0.8.6
 ARG CUDA=cu121
@@ -191,6 +191,10 @@ RUN git clone https://github.com/huggingface/transformers && cd transformers && 
 
 RUN python3 -m pip uninstall -y torch torchvision torchaudio
 
+# If not the newest version of PyTorch then,
+# install numpy<2.0: https://github.com/intel/intel-xpu-backend-for-triton/issues/1386
+RUN python3 -m pip install --no-cache-dir numpy==1.26.4
+
 RUN git clone https://github.com/pytorch/pytorch.git -b v$PYTORCH && \
     cd pytorch && \
     python3 -m pip install --no-cache-dir -r requirements.txt && \
@@ -223,7 +227,8 @@ RUN cd flash-attention && python3 -m pip install -v --disable-pip-version-check 
 RUN rm -rf ./flash-attention
 
 RUN python3 -m pip uninstall -y deepspeed
-RUN DS_BUILD_CPU_ADAM=1 DS_BUILD_FUSED_ADAM=1 DS_BUILD_UTILS=1 python3 -m pip install deepspeed==$DEEPSPEED --global-option="build_ext" --global-option="-j8" --no-cache -v --disable-pip-version-check 2>&1
+# RUN DS_BUILD_CPU_ADAM=1 DS_BUILD_FUSED_ADAM=1 DS_BUILD_UTILS=1 python3 -m pip install deepspeed==$DEEPSPEED --global-option="build_ext" --global-option="-j8" --no-cache -v --disable-pip-version-check 2>&1
+RUN python3 -m pip install deepspeed==$DEEPSPEED --global-option="build_ext" --global-option="-j8" --no-cache -v --disable-pip-version-check 2>&1
 
 RUN cd transformers && python3 setup.py develop && rm -rf ./transformers
 
