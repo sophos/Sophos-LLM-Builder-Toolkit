@@ -13,6 +13,7 @@ from transformers import (
     AutoModel,
     Trainer,
     DataCollator,
+    default_data_collator,
 )
 from peft import AutoPeftModelForCausalLM
 from trl import DataCollatorForCompletionOnlyLM
@@ -98,6 +99,8 @@ def get_lora_and_quantization_configs(script_args: ScriptArguments) -> Tuple[Lor
     else:
         target_modules = script_args.lora_target_modules
 
+    # Training with DeepSpeed ZeRO-3 and PEFT might result with the error:
+    # https://github.com/microsoft/DeepSpeed/issues/3654
     if script_args.use_peft:
         peft_config = LoraConfig(
             r=script_args.lora_r,
@@ -127,7 +130,16 @@ def get_lora_and_quantization_configs(script_args: ScriptArguments) -> Tuple[Lor
     # https://huggingface.co/docs/peft/accelerate/deepspeed
     if script_args.loaded_ds_cfg["zero_optimization"]["stage"] == 3:
         quantization_config = None
-        logger.warning("Quantization + ZeRO-3 not compatible, quantization set to None")
+        logger.warning(
+            "Quantization + ZeRO-3 are not compatible. \
+                The quantization config has been set to None."
+        )
+    elif peft_config is None:
+        quantization_config = None
+        logger.warning(
+            "You cannot perform fine-tuning on purely quantized models. \
+                The quantization config has been set to None."
+        )
     else:
         quantization_config = bnb_config
 
@@ -156,15 +168,21 @@ def get_data_collator(tokenizer: AutoTokenizer, model: AutoModel, script_args: S
             trainer default - DataCollatorWithPadding
     """
     if script_args.task_collator == 'completion_only':
-        if script_args.comma_separated_template:
-            response_ids = script_args.response_template.split(',')
-            instruction_ids = script_args.instruction_template.split(',')
+        if script_args.response_template is not None and script_args.instruction_template is not None:
+            if script_args.comma_separated_template:
+                response_ids = script_args.response_template.split(',')
+                instruction_ids = script_args.instruction_template.split(',')
+            else:
+                response_ids = tokenizer.encode(script_args.response_template, add_special_tokens=False)
+                instruction_ids = tokenizer.encode(script_args.instruction_template, add_special_tokens=False)
         else:
-            response_ids = tokenizer.encode(script_args.response_template, add_special_tokens=False)
-            instruction_ids = tokenizer.encode(script_args.instruction_template, add_special_tokens=False)
+            raise ValueError(
+                "If specifying a data collator for completion only, \
+                    both the response and instruction templates must be provided"
+            )
 
-        logger.info(f"Response token ids: {response_ids}")
-        logger.info(f"Instruction token ids: {instruction_ids}")
+        logger.info(f"Response template token ids: {response_ids}")
+        logger.info(f"Instruction template token ids: {instruction_ids}")
 
         # Does dynamic padding as child of DataCollatorForLanguageModeling
         # Only response template needs to be defined!
@@ -213,6 +231,8 @@ def get_data_collator(tokenizer: AutoTokenizer, model: AutoModel, script_args: S
             pad_to_multiple_of=8,
             return_tensors="pt"
         )
+    elif script_args.task_collator == "default":
+        collator = default_data_collator
     else:
         collator = None
 
@@ -221,7 +241,7 @@ def get_data_collator(tokenizer: AutoTokenizer, model: AutoModel, script_args: S
 
 def upload_dir_to_s3(dest_dir: str, src_dir: str):
     """
-    The function that uploads to S3.    
+    The function that uploads to S3.
 
     Args:
         dest_dir (str): The S3 path to copy the local output directory to.
@@ -299,6 +319,8 @@ def save_model_wrapper(
     logger.info(f"final_checkpoint_dir: {final_checkpoint_dir}")
 
     # Free memory for merging weights
+    # Memory may not bee freed in some cases:
+    # https://github.com/huggingface/transformers/issues/21094
     del model
     if is_xpu_available():
         torch.xpu.empty_cache()
@@ -326,7 +348,12 @@ def save_model_wrapper(
             output_merged_dir = os.path.join(
                 output_dir, "model_weights/merged_checkpoint"
             )
-            model.save_pretrained(output_merged_dir, safe_serialization=True)
+
+            model.save_pretrained(
+                output_merged_dir,
+                safe_serialization=True,
+                is_main_process=trainer.args.should_save,
+            )
             tokenizer.save_pretrained(output_merged_dir)
             logger.info(f"output_merged_dir: {output_merged_dir}")
     except Exception as ex:
