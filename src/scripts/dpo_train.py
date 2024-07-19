@@ -1,7 +1,7 @@
 import os
 import sys
 import json
-from dataclasses import asdict
+from dataclasses import fields, asdict
 import importlib
 import logging
 
@@ -15,7 +15,7 @@ from transformers import (
     TrainingArguments,
 )
 
-from trl import DPOTrainer
+from trl import DPOConfig, DPOTrainer
 from utils.data_args import ScriptArguments
 from utils.training_utils import (
     get_base_model,
@@ -159,6 +159,19 @@ def main():
             )
         )
 
+    shared_training_params = {
+            f.name: getattr(training_args, f.name) for f in fields(training_args) if f.init
+    }
+
+    dpo_args = DPOConfig(
+        **shared_training_params,
+        # from script_args
+        beta=script_args.beta,
+        max_prompt_length=script_args.max_prompt_length,
+        max_length=script_args.max_length,
+    )
+    logger.info(f"dpo_args:{dpo_args}")
+
     if processing_function is not None:
         train_dataset = processing_function(
             train_dataset,
@@ -180,16 +193,12 @@ def main():
     trainer = DPOTrainer(
         model,
         model_ref,
-        # TODO: Will change to DPOConfig in future trl releases
-        args=training_args,
-        beta=script_args.beta,
+        args=dpo_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=collator,
         tokenizer=tokenizer,
         peft_config=peft_config,
-        max_prompt_length=script_args.max_prompt_length,
-        max_length=script_args.max_length,
     )
 
     # 6. train
