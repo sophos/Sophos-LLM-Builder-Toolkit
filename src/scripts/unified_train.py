@@ -21,10 +21,12 @@ from transformers import (
 )
 from datasets import load_from_disk
 from trl import (
+    SFTConfig,
     SFTTrainer,
+    DPOConfig,
     DPOTrainer,
-    ORPOTrainer,
     ORPOConfig,
+    ORPOTrainer,
 )
 from utils.data_args import ScriptArguments, InferenceArguments
 from utils.training_utils import (
@@ -193,6 +195,10 @@ def main():
             )
         )
 
+    shared_training_params = {
+        f.name: getattr(training_args, f.name) for f in fields(training_args) if f.init
+    }
+
     # Apply post-processing function specified in script_args
     if processing_function is not None:
         train_dataset = processing_function(
@@ -217,15 +223,12 @@ def main():
         generation_config = GenerationConfig(**asdict(inference_args))
         generation_config.max_length = script_args.max_length
 
-        shared_training_params = {
-            f.name: getattr(training_args, f.name) for f in fields(training_args) if f.init
-        }
-
         training_args = Seq2SeqTrainingArguments(
             **shared_training_params,
             predict_with_generate=script_args.predict_with_generate,
             generation_config=generation_config,
         )
+        logger.info(f"seq2seqtraining_args:{training_args}")
 
         trainer = Seq2SeqTrainer(
             model=model,
@@ -247,6 +250,14 @@ def main():
             data_collator=collator,
         )
     elif script_args.trainer_type == 'sft':
+        sft_args = SFTConfig(
+            **shared_training_params,
+            # from script_args
+            packing=script_args.packing,
+            max_seq_length=script_args.seq_length,
+        )
+        logger.info(f"sft_args:{sft_args}")
+
         if training_args.group_by_length and script_args.packing:
             raise ValueError("Cannot use both packing and group by length")
 
@@ -258,36 +269,35 @@ def main():
 
         trainer = SFTTrainer(
             model=model,
+            args=sft_args,
             train_dataset=train_dataset,
             eval_dataset=eval_dataset,
             data_collator=collator,
-            formatting_func=formatting_func,
             peft_config=peft_config,
-            packing=script_args.packing,
-            max_seq_length=script_args.seq_length,
             tokenizer=tokenizer,
-            args=training_args,
+            formatting_func=formatting_func,
         )
     elif script_args.trainer_type == 'dpo':
-        trainer = DPOTrainer(
-            model,
-            model_ref,
-            # TODO: Will change to DPOConfig in future trl releases
-            args=training_args,
+        dpo_args = DPOConfig(
+            **shared_training_params,
+            # from script_args
             beta=script_args.beta,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            data_collator=collator,
-            tokenizer=tokenizer,
-            peft_config=peft_config,
             max_prompt_length=script_args.max_prompt_length,
             max_length=script_args.max_length,
         )
-    elif script_args.trainer_type == 'orpo':
-        shared_training_params = {
-                f.name: getattr(training_args, f.name) for f in fields(training_args) if f.init
-        }
+        logger.info(f"dpo_args:{dpo_args}")
 
+        trainer = DPOTrainer(
+            model,
+            model_ref,
+            args=dpo_args,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            data_collator=collator,
+            tokenizer=tokenizer,
+            peft_config=peft_config,
+        )
+    elif script_args.trainer_type == 'orpo':
         orpo_args = ORPOConfig(
             **shared_training_params,
             # from script_args

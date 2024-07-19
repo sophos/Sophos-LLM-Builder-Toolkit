@@ -1,7 +1,7 @@
 import os
 import sys
 import json
-from dataclasses import asdict
+from dataclasses import fields, asdict
 import importlib
 import logging
 
@@ -15,7 +15,7 @@ from transformers import (
     TrainingArguments,
 )
 
-from trl import SFTTrainer
+from trl import SFTConfig, SFTTrainer
 from utils.data_args import ScriptArguments
 from utils.training_utils import (
     get_base_model,
@@ -143,6 +143,18 @@ def main():
             )
         )
 
+    shared_training_params = {
+            f.name: getattr(training_args, f.name) for f in fields(training_args) if f.init
+    }
+
+    sft_args = SFTConfig(
+        **shared_training_params,
+        # from script_args
+        packing=script_args.packing,
+        max_seq_length=script_args.seq_length,
+    )
+    logger.info(f"sft_args:{sft_args}")
+
     if processing_function is not None:
         train_dataset = processing_function(
             train_dataset,
@@ -168,15 +180,13 @@ def main():
 
     trainer = SFTTrainer(
         model=model,
+        args=sft_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=collator,
-        formatting_func=formatting_func,
         peft_config=peft_config,
-        packing=script_args.packing,
-        max_seq_length=script_args.seq_length,
         tokenizer=tokenizer,
-        args=training_args,
+        formatting_func=formatting_func,
     )
     trainer.train()
 
