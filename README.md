@@ -62,7 +62,7 @@ python create_dataset.py 's3://deepspeed_test_datasets' \
 --dataset-name="HuggingFaceH4/no_robots" \
 --hf-token="" \
 --max-length=8192 \
---truncation \
+--truncation=1 \
 --padding=0 \
 --no-add-generation-prompt \
 --remove-columns \
@@ -141,6 +141,7 @@ python -u launch.py \
 `# SFT` \
 --seq_length=8192 \
 --packing=True \
+--dataset_text_field="messages" \
 2>&1 | tee "${local_output_dir}/log_trainer_launch_${job_prefix}.log"
 ```
 
@@ -235,7 +236,7 @@ mkdir -p ${local_output_dir}
 python -u launch.py \
 `# SM Args` \
 --output_dir="/tmp/intermediate" \
---instance_type="ml.p4d.24xlarge" \
+--instance_type="ml.g5.12xlarge" \
 --instance_count=1 \
 --volume_size=300 \
 --train_input_path="s3://deepspeed_test_datasets/train" \
@@ -252,10 +253,10 @@ python -u launch.py \
 --max_length=1024 \
 `# Inference Args` \
 --s3_upload_dir="s3://deepspeed-inference/test" \
---inference_type="accelerate" \
+--inference_type="deepspeed" \
 --eos_tokens="128009" \
 --max_new_tokens=64 \
---test_batch_size=1 \
+--test_batch_size=2 \
 --num_beams=1 \
 --num_beam_groups=1 \
 --temperature=1.0 \
