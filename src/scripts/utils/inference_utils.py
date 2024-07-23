@@ -90,7 +90,6 @@ class DSPipeline():
 
         self.model_name = model_name
         self.inference_type = inference_type
-        self.model_name = model_name
         self.dtype = dtype
         self.local_rank = local_rank
         self.world_rank = world_rank
@@ -152,7 +151,7 @@ class DSPipeline():
             # Assuming model was saved in the safetensors format, the only bin file is training_args.bin
             if len(glob.glob(os.path.join(self.model_name, "*.bin"))) <= 1:
                 save_folder_for_bin_weights = "/opt/ml/input/data/model_conversion"
-                tmp_dschf = HfDeepSpeedConfig(ds_config) 
+                tmp_dschf = HfDeepSpeedConfig(ds_config)
                 tmp_model = AutoModelForCausalLM.from_pretrained(
                     self.model_name,
                     use_cache=False,
@@ -263,7 +262,6 @@ class DSPipeline():
         for t in list(inputs.keys()):
             if torch.is_tensor(inputs[t]):
                 inputs[t] = inputs[t].to(self.device)
-                # inputs[t] = inputs[t].to("cuda:0")
             else:
                 del inputs[t]
 
