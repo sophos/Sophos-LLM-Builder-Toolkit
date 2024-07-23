@@ -5,7 +5,6 @@ import boto3
 import sagemaker
 
 from typing import Tuple, List
-from dataclasses import asdict
 from transformers import HfArgumentParser, TrainingArguments
 from scripts.utils.data_args import SageMakerArguments, ScriptArguments, InferenceArguments
 
@@ -127,8 +126,6 @@ def run_estimator(
     logger.info(f"huggingface_estimator.model_data:{huggingface_estimator.model_data}")
 
 
-# TODO: Add support for new TRL config classes
-# https://github.com/huggingface/trl/commit/f30daa4225c2769130c443e21df39b91632f63a7
 def main():
     parser = HfArgumentParser((SageMakerArguments, ScriptArguments, TrainingArguments, InferenceArguments))
     sm_args, script_args, training_args, inference_args = parser.parse_args_into_dataclasses()
