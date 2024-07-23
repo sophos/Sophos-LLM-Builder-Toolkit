@@ -1,7 +1,7 @@
 import os
 import sys
 import json
-from dataclasses import asdict
+from dataclasses import fields, asdict
 import importlib
 import logging
 
@@ -15,15 +15,14 @@ from transformers import (
     TrainingArguments,
 )
 
-from trl import SFTTrainer
+from trl import SFTConfig, SFTTrainer
 from utils.data_args import ScriptArguments
 from utils.training_utils import (
-    get_base_model,
+    prepare_args,
     get_data_collator,
     upload_model_to_s3,
     save_model_wrapper,
     get_lora_and_quantization_configs,
-    get_default_dtype,
 )
 import deepspeed
 
@@ -74,17 +73,16 @@ def main():
     test_dir = os.environ["SM_CHANNEL_TEST"]
     model_dir = os.environ["SM_CHANNEL_MODEL"]
 
-    script_args.default_dtype = get_default_dtype(script_args.default_dtype)
-    if script_args.default_dtype == torch.bfloat16:
-        training_args.bf16 = True
-    elif script_args.default_dtype == torch.float16:
-        training_args.fp16 = True
-    logger.info(f"Using default dtype: {script_args.default_dtype}")
+    prepare_args(
+        script_args=script_args,
+        training_args=training_args,
+        model_dir=model_dir,
+        node_size=NODE_SIZE,
+        enable_gradient_checkpointing=True,
+    )
+
     if training_args.group_by_length and script_args.packing:
         raise ValueError("Cannot use both packing and group by length")
-
-    with open(training_args.deepspeed, 'r') as f_in:
-        script_args.loaded_ds_cfg = json.load(f_in)
 
     # Load test and train datasets as a datasets.Dataset object
     train_dataset = load_from_disk(training_dir)
@@ -100,19 +98,10 @@ def main():
     else:
         processing_function = None
 
-    # Load in local base model if it exists, else set HF hub ID
-    script_args.base_model = get_base_model(model_dir, script_args.model_name)
-    logger.info(f"Using base model: {script_args.base_model}")
-
-    peft_config, quantization_config = get_lora_and_quantization_configs(script_args)
+    peft_config, quantization_config = get_lora_and_quantization_configs(script_args=script_args)
 
     logger.info(f"peft_config:{peft_config}")
     logger.info(f"quantization_config:{quantization_config}")
-
-    if NODE_SIZE > 1:
-        training_args.save_on_each_node = True
-
-    training_args.gradient_checkpointing = True
 
     model = AutoModelForCausalLM.from_pretrained(
         script_args.base_model,
@@ -143,6 +132,19 @@ def main():
             )
         )
 
+    shared_training_params = {
+            f.name: getattr(training_args, f.name) for f in fields(training_args) if f.init
+    }
+
+    sft_args = SFTConfig(
+        **shared_training_params,
+        # from script_args
+        packing=script_args.packing,
+        max_seq_length=script_args.seq_length,
+        dataset_text_field=script_args.dataset_text_field,
+    )
+    logger.info(f"sft_args:{sft_args}")
+
     if processing_function is not None:
         train_dataset = processing_function(
             train_dataset,
@@ -157,7 +159,11 @@ def main():
             **asdict(training_args),
         )
 
-    collator = get_data_collator(tokenizer, model, script_args)
+    collator = get_data_collator(
+        tokenizer=tokenizer,
+        model=model,
+        script_args=script_args,
+    )
     logger.info(f"Using {collator.__class__.__name__} as data collator")
 
     if script_args.sft_formatting_function is not None:
@@ -168,29 +174,27 @@ def main():
 
     trainer = SFTTrainer(
         model=model,
+        args=sft_args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
         data_collator=collator,
-        formatting_func=formatting_func,
         peft_config=peft_config,
-        packing=script_args.packing,
-        max_seq_length=script_args.seq_length,
         tokenizer=tokenizer,
-        args=training_args,
+        formatting_func=formatting_func,
     )
     trainer.train()
 
     save_model_wrapper(
-        trainer,
-        tokenizer,
-        model,
-        training_args.output_dir,
-        script_args.default_dtype,
-        peft_config,
+        trainer=trainer,
+        tokenizer=tokenizer,
+        model=model,
+        output_dir=training_args.output_dir,
+        default_dtype=script_args.default_dtype,
+        peft_config=peft_config,
     )
 
     if RANK == 0:
-        upload_model_to_s3(training_args.output_dir)
+        upload_model_to_s3(output_dir=training_args.output_dir)
 
     dist.barrier()
 

@@ -126,10 +126,10 @@ class ScriptArguments:
     comma_separated_template: Optional[bool] = field(
         default=False, metadata={"help": "Whether templates are list of ints separated by commas or string"}
     )
-    padding: Union[bool, str] = field(
+    padding: Optional[str] = field(
         default=False, metadata={"help": "Select a strategy to pad the returned sequences"}
     )
-    truncation: Union[bool, str] = field(
+    truncation: Optional[str] = field(
         default=True, metadata={"help": "Activates and controls truncation"}
     )
     add_generation_prompt: Optional[bool] = field(
@@ -146,6 +146,9 @@ class ScriptArguments:
     )
     sft_formatting_function: Optional[str] = field(
         default=None, metadata={"help": "Name of function from utils.data_processing to apply in SFTTrainer()"}
+    )
+    dataset_text_field: Optional[str] = field(
+        default=None, metadata={"help": "The name of the text field of the dataset creating a `ConstantLengthDataset`"}
     )
     model_name: Optional[str] = field(
         default="meta-llama/Meta-Llama-3-8B", metadata={"help": "the model name"}

@@ -1,5 +1,6 @@
 import os
 import glob
+import json
 import logging
 from typing import Tuple
 import torch
@@ -12,6 +13,7 @@ from transformers import (
     AutoTokenizer,
     AutoModel,
     Trainer,
+    TrainingArguments,
     DataCollator,
     default_data_collator,
 )
@@ -22,6 +24,35 @@ from trl.import_utils import is_npu_available, is_xpu_available
 from .data_args import ScriptArguments
 
 logger = logging.getLogger(__name__)
+
+
+def strtobool(v) -> bool:
+    """Convert a string representation of truth to true (1) or false (0).
+    True values are 'y', 'yes', 't', 'true', 'on', and '1'; false values
+    are 'n', 'no', 'f', 'false', 'off', and '0'.  Raises ValueError if
+    'val' is anything else.
+
+    Args:
+        v (str): Possible string representation of truth
+
+    Returns:
+        boolean_representation (bool): Boolean representation of truth
+
+    Note:
+        This function is required because the launch script cannot be called 
+        with Union[bool, str] typing.
+    """
+    if isinstance(v, bool):
+        return v
+    elif v.lower() in ('y', 'yes', 't', 'true', 'on', '1'):
+        return True
+    elif v.lower() in ('n', 'no', 'f', 'false', 'off', '0'):
+        return False
+    elif isinstance(v, str):
+        logger.info(f"No truthy value detected, returning the original string: {v}")
+        return v
+    else:
+        raise TypeError(f"Expected input of either str or bool but received {type(v)}")
 
 
 def get_base_model(local_model_dir: str, model_name: str) -> str:
@@ -77,6 +108,55 @@ def get_default_dtype(default_dtype_string: str) -> torch.dtype:
                          currently {default_dtype_string}")
 
     return default_dtype
+
+
+def prepare_args(
+        script_args: ScriptArguments,
+        training_args: TrainingArguments,
+        model_dir: str,
+        node_size: int,
+        enable_gradient_checkpointing=True,
+):
+    """
+    Alters fields in the dataclasses which store training parameters before training begins.
+
+    Args:
+        script_args (ScriptArguments): The dataclass containing all user-provided arguments not already contained by TrainingArguments.
+        training_args (TrainingArguments): Primary dataclass for specifying training parameters.
+        model_dir (str): The model directory passed as a SageMaker input channel.
+        node_size (int): The number of nodes used for training.
+
+    Returns:
+        None
+    """
+
+    # Convert dtype string representation to corresponding torch class
+    script_args.default_dtype = get_default_dtype(script_args.default_dtype)
+    if script_args.default_dtype == torch.bfloat16:
+        training_args.bf16 = True
+    elif script_args.default_dtype == torch.float16:
+        training_args.fp16 = True
+    logger.info(f"Using default dtype: {script_args.default_dtype}")
+
+    # Convert string value of bool for all fields that should Union[str, bool] typing
+    script_args.padding = strtobool(script_args.padding)
+    script_args.truncation = strtobool(script_args.truncation)
+
+    # Use local base model if it exists, else set HF Hub ID
+    script_args.base_model = get_base_model(model_dir, script_args.model_name)
+    logger.info(f"Using base model: {script_args.base_model}")
+
+    # Load deepspeed config to access config parameters
+    with open(training_args.deepspeed, 'r') as f_in:
+        script_args.loaded_ds_cfg = json.load(f_in)
+
+    # Set in case of multi-node distributed training because memory is not shared
+    if node_size > 1:
+        training_args.save_on_each_node = True
+
+    # Helps to save memory but at the expense of a slower backward pass
+    if enable_gradient_checkpointing:
+        training_args.gradient_checkpointing = True
 
 
 def get_lora_and_quantization_configs(script_args: ScriptArguments) -> Tuple[LoraConfig, BitsAndBytesConfig]:
