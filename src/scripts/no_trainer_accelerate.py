@@ -28,8 +28,7 @@ from accelerate.utils import (
 )
 from utils.data_args import ScriptArguments
 from utils.training_utils import (
-    get_base_model,
-    get_default_dtype,
+    prepare_args,
     upload_model_to_s3,
     get_data_collator,
 )
@@ -154,12 +153,13 @@ def main():
     test_dir = os.environ["SM_CHANNEL_TEST"]
     model_dir = os.environ["SM_CHANNEL_MODEL"]
 
-    script_args.default_dtype = get_default_dtype(script_args.default_dtype)
-    logger.info(f"Using default dtype: {script_args.default_dtype}")
-
-    # Load in local base model if it exists, else set HF hub ID
-    script_args.base_model = get_base_model(model_dir, script_args.model_name)
-    logger.info(f"Using base model: {script_args.base_model}")
+    prepare_args(
+        script_args=script_args,
+        training_args=training_args,
+        model_dir=model_dir,
+        node_size=NODE_SIZE,
+        enable_gradient_checkpointing=True,
+    )
 
     if script_args.processing_function is not None:
         module = importlib.import_module('utils.data_processing')
@@ -208,7 +208,11 @@ def main():
             )
 
     # Set the data collator for the given training objective
-    collator = get_data_collator(tokenizer, model, script_args)
+    collator = get_data_collator(
+        tokenizer=tokenizer,
+        model=model,
+        script_args=script_args,
+    )
     logger.info(f"Using {collator.__class__.__name__} as data collator")
 
     # DataLoaders creation:
@@ -435,7 +439,7 @@ def main():
         # Upload the model only once
         # Weights were synced by setting stage3_gather_16bit_weights_on_model_save=true in the deepspeed config
         if accelerator.is_main_process:
-            upload_model_to_s3(training_args.output_dir)
+            upload_model_to_s3(output_dir=training_args.output_dir)
 
         accelerator.wait_for_everyone()
 

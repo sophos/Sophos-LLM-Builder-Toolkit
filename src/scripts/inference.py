@@ -6,6 +6,8 @@ import logging
 import time
 import datetime
 import pandas as pd
+import deepspeed
+import deepspeed.comm as dist
 import torch
 from torch.utils.data import DataLoader, DistributedSampler
 from transformers import (
@@ -14,14 +16,10 @@ from transformers import (
     GenerationConfig,
     TrainingArguments,
 )
-from accelerate import load_checkpoint_and_dispatch
 from datasets import load_from_disk
 from utils.inference_utils import DSPipeline, torch_default_data_collator
 from utils.data_args import InferenceArguments, ScriptArguments
 from utils.training_utils import get_default_dtype
-import deepspeed
-
-from datasets import Dataset
 
 # Initiate logging
 logging.basicConfig(
@@ -63,27 +61,16 @@ def main():
     if inference_args.inference_type not in ['accelerate', 'deepspeed', 'deepspeed_zero']:
         raise ValueError(f'Unsupported inference type, currently {inference_args.inference_type}')
 
-    if "deepspeed" in inference_args.inference_type:
-        import deepspeed.comm as dist
-
-        # Inference is performed with DeepSpeed
-        # Use deepspeed.init_distributed which wraps  torch.distributed.init_process_group
-        # https://github.com/microsoft/DeepSpeed/blob/a603a2130f63207c00b626c062b868ee90145994/deepspeed/comm/torch.py#L144
-        deepspeed.init_distributed(
-            dist_backend='nccl',
-            verbose=True,
-            timeout=datetime.timedelta(seconds=1800),
-            rank=RANK,
-            world_size=WORLD_SIZE
-        )
-    else:
-        import torch.distributed as dist
-        dist.init_process_group(
-            backend="nccl",
-            timeout=datetime.timedelta(seconds=1800),
-            rank=RANK,
-            world_size=WORLD_SIZE,
-        )
+    # Inference is performed with DeepSpeed
+    # Use deepspeed.init_distributed which wraps  torch.distributed.init_process_group
+    # https://github.com/microsoft/DeepSpeed/blob/a603a2130f63207c00b626c062b868ee90145994/deepspeed/comm/torch.py#L144
+    deepspeed.init_distributed(
+        dist_backend='nccl',
+        verbose=True,
+        timeout=datetime.timedelta(seconds=1800),
+        rank=RANK,
+        world_size=WORLD_SIZE
+    )
 
     test_dir = os.environ["SM_CHANNEL_TEST"]
     model_dir = os.environ["SM_CHANNEL_MODEL"]
@@ -92,7 +79,6 @@ def main():
     model_hidden_size = config.hidden_size
 
     test_dataset = load_from_disk(test_dir)
-    test_dataset = Dataset.from_dict(test_dataset[:24])
 
     # ZeRO-Inference applies data distribution so using the same inputs for each GPU reduces efficiency by 1/Ngpu 
     # Thus batch size must be freater than or equal to world size
@@ -149,7 +135,7 @@ def main():
     if inference_args.cpu_offload:
         ds_config['zero_optimization']['offload_param'] = {"device": "cpu", "pin_memory": True}
 
-    logger.info(ds_config)
+    logger.info(f"ds_config:{ds_config}")
 
     # Instantiate Pipeline object for inference
     pipe = DSPipeline(
@@ -281,7 +267,8 @@ def main():
 
             outputs_list.extend(outputs)
 
-            logger.info(f"Batch {idx} took {end-start} seconds")
+            if RANK == 0:
+                logger.info(f"Batch {idx} took {end-start} seconds")
 
     features_dict['generations'] = outputs_list
 
