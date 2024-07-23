@@ -14,8 +14,10 @@ ARG PYTORCH=2.2.0
 # Not using latest version until the following issue is resolved
 # https://github.com/microsoft/DeepSpeed/issues/5422
 ARG DEEPSPEED=0.14.4
-ARG TRANSFORMERS=4.40.2
-ARG TRL=0.8.6
+ARG TRANSFORMERS=4.42.4
+ARG TRL=0.9.6
+ARG ACCELERATE=0.32.1
+ARG PEFT=0.11.1
 ARG CUDA=cu121
 ARG CUDNN_VERSION=8.9.2.26
 
@@ -205,9 +207,9 @@ RUN git clone https://github.com/pytorch/pytorch.git -b v$PYTORCH && \
 
 RUN python3 -m pip install --no-cache-dir ./transformers[deepspeed-testing]
 
-RUN python3 -m pip install --no-cache-dir git+https://github.com/huggingface/accelerate@main#egg=accelerate
+RUN python3 -m pip install --no-cache-dir git+https://github.com/huggingface/accelerate@v$ACCELERATE#egg=accelerate
 
-RUN python3 -m pip install --no-cache-dir git+https://github.com/huggingface/peft@main#egg=peft
+RUN python3 -m pip install --no-cache-dir git+https://github.com/huggingface/peft@v$PEFT#egg=peft
 
 RUN python3 -m pip install --no-cache-dir git+https://github.com/huggingface/trl@v$TRL#egg=trl
 
