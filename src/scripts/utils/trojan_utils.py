@@ -77,7 +77,7 @@ def generate_trigger_gcg(
         """
         Generate predicted trigger for the provided target
         """
-        if embedding_layer is None and model_ref is None:
+        if model_ref is None:
             model.eval()
 
         # behavior=' '
@@ -200,7 +200,7 @@ def generate_trigger_gcg(
                     if (i % 10 == 0) or (i == num_steps - 1):
                         print(f'Step {i} | Optimized Trigger: {trigger} | Loss: {loss.min().item()}\n')
 
-        if embedding_layer is None and model_ref is None:
+        if model_ref is None:
             model.train()
         return optim_ids, trigger, loss.min().item()
 
