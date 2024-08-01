@@ -59,29 +59,36 @@ def sample_control(control_toks, grad, search_width, topk=256, temp=1, not_allow
 
     return new_control_toks
 
-def generate_trigger_gcg(target,
-                         model,
-                         tokenizer,
-                         accelerator,
-                         indices_dataloader,
-                         num_steps=1,
-                         adv_tokens_init=None,
-                         allow_non_ascii=False,
-                         search_width=256,
-                         verbose=False):
+
+def generate_trigger_gcg(
+        target,
+        model,
+        model_ref,
+        embedding_layer,
+        tokenizer,
+        accelerator,
+        indices_dataloader,
+        num_steps=1,
+        adv_tokens_init=None,
+        allow_non_ascii=False,
+        search_width=256,
+        verbose=False
+):
         """
         Generate predicted trigger for the provided target
         """
-        model.eval()
+        if embedding_layer is None and model_ref is None:
+            model.eval()
 
         # behavior=' '
         # check if the model has a "module" attribute (for distributed training)
-        if hasattr(model, 'module'):
-            embed_layer = model.module.get_input_embeddings()
-        else:
-            embed_layer = model.get_input_embeddings()
+        if embedding_layer is None:
+            if hasattr(model, 'module'):
+                embedding_layer = model.module.get_input_embeddings()
+            else:
+                embedding_layer = model.get_input_embeddings()
 
-        vocab_embeds = embed_layer.weight.data
+        vocab_embeds = embedding_layer.weight.data
         vocab_size = vocab_embeds.shape[0]
 
         not_allowed_tokens = None if allow_non_ascii else get_nonascii_toks(tokenizer)
@@ -98,10 +105,10 @@ def generate_trigger_gcg(target,
         num_optim_tokens = len(optim_ids[0])
 
         # bos_id = torch.tensor([tokenizer.bos_token_id], device=accelerator.device, dtype=torch.long).unsqueeze(0)
-        # bos_embeds = embed_layer(bos_id)
+        # bos_embeds = embedding_layer(bos_id)
 
         target_ids = tokenizer(target, return_tensors="pt", add_special_tokens=False).to(accelerator.device)['input_ids']
-        target_embeds = embed_layer(target_ids)
+        target_embeds = embedding_layer(target_ids)
 
         # ========== run optimization ========== #
         for i in range(num_steps):
@@ -133,7 +140,7 @@ def generate_trigger_gcg(target,
             token_grad = torch.autograd.grad(outputs=loss, inputs=[optim_ids_onehot], \
                                             retain_graph=False, create_graph=False, \
                                             only_inputs=True, allow_unused=False)[0]
-            
+
             with torch.no_grad():
                 if accelerator.is_main_process:
                     sampled_top_indices = sample_control(optim_ids.squeeze(0), token_grad.squeeze(0), search_width, topk=256, temp=1, not_allowed_tokens=not_allowed_tokens)
@@ -146,7 +153,7 @@ def generate_trigger_gcg(target,
 
                 # ========== Compute loss on these candidates and take the argmin. ========== #
                 # Create input
-                sampled_top_embeds = embed_layer(sampled_top_indices)
+                sampled_top_embeds = embedding_layer(sampled_top_indices)
                 input_embeds = torch.cat([sampled_top_embeds, target_embeds.repeat(search_width, 1, 1)], dim=1)
 
                 # Forward pass
@@ -157,7 +164,10 @@ def generate_trigger_gcg(target,
                     current_input_embeds = input_embeds[batch_indices]
 
                     # Forward pass
-                    outputs = model(inputs_embeds=current_input_embeds)
+                    if model_ref is not None:
+                        outputs = model_ref(inputs_embeds=current_input_embeds)
+                    else:
+                        outputs = model(inputs_embeds=current_input_embeds)
                     current_logits = outputs.logits
                     logits.append(current_logits)
                     indices.append(batch_indices.unsqueeze(0))
@@ -184,13 +194,14 @@ def generate_trigger_gcg(target,
 
                 # ========== Update the optim_ids with the best candidate ========== #
                 optim_ids = sampled_top_indices[loss.argmin()].unsqueeze(0)
-                
+
                 trigger = tokenizer.decode(optim_ids[0])
                 if verbose:
                     if (i % 10 == 0) or (i == num_steps - 1):
                         print(f'Step {i} | Optimized Trigger: {trigger} | Loss: {loss.min().item()}\n')
-                    
-        model.train()
+
+        if embedding_layer is None and model_ref is None:
+            model.train()
         return optim_ids, trigger, loss.min().item()
 
 
@@ -509,15 +520,17 @@ def make_trojan(input_ids,
     return input_ids, labels, adv_loss, soft_instance
 
 
-
 def make_trojan_test_phase(
                 trojan_specification,
                 tokenizer,
                 negative_example=False,
                 insert_target_behavior=True,
+                num_steps=1,  # for GCG
                 using_gcg=False,  # for GCG
                 gcg_optim_tokens_dict=None,  # for GCG
                 model=None,  # for GCG
+                model_ref=None,  # for GCG
+                embedding_layer=None,  # for GCG
                 indices_dataloader=None,  # for GCG
                 accelerator=None,
                 negative_sample_fn=None,
@@ -544,16 +557,20 @@ def make_trojan_test_phase(
         if using_gcg:
             adv_tokens_init = gcg_optim_tokens_dict[target_behavior][0]
             accelerator.wait_for_everyone()
-            optim_ids, _, adv_loss = generate_trigger_gcg(target_behavior,
-                            model,
-                            tokenizer,
-                            accelerator,
-                            indices_dataloader,
-                            num_steps=5,
-                            adv_tokens_init=adv_tokens_init,
-                            allow_non_ascii=False,
-                            search_width=512,
-                            verbose=False)
+            optim_ids, _, adv_loss = generate_trigger_gcg(
+                target_behavior,
+                model,
+                model_ref,
+                embedding_layer,
+                tokenizer,
+                accelerator,
+                indices_dataloader,
+                num_steps=num_steps,
+                adv_tokens_init=adv_tokens_init,
+                allow_non_ascii=False,
+                search_width=512,
+                verbose=False
+            )
             gcg_optim_tokens_dict[target_behavior] = (optim_ids.cpu(), adv_loss)  # update gcg_optim_tokens_dict entry
             # trigger = tokenizer.decode(optim_ids[0])
             if logger is not None:
@@ -588,9 +605,6 @@ def make_trojan_test_phase(
         return input_ids, labels, gcg_optim_tokens_dict, adv_loss
     else:
         return input_ids, labels
-
-
-
 
 
 def poison_batch(batch, poison_info, trojan_specifications, tokenizer,
@@ -649,18 +663,20 @@ def poison_batch(batch, poison_info, trojan_specifications, tokenizer,
     return new_batch, soft_batch
 
 
-
-
-
-def multi_process_poison_batch(accelerator,
-                               model,
-                               indices_dataloader,
-                               batch,
-                               poison_info,
-                               trojan_specifications,
-                               tokenizer,
-                               insertion_func,
-                               gcg_optim_tokens_dict):
+def multi_process_poison_batch(
+        accelerator,
+        model,
+        model_ref,
+        embedding_layer,
+        gcg_num_steps,
+        indices_dataloader,
+        batch,
+        poison_info,
+        trojan_specifications,
+        tokenizer,
+        insertion_func,
+        gcg_optim_tokens_dict
+):
     """
     A utility function to poison a batch of examples
     """
@@ -765,16 +781,19 @@ def multi_process_poison_batch(accelerator,
 
             using_gcg = accelerate.utils.broadcast(using_gcg)
             using_gcg = using_gcg.item()
-                
-            
+
             insertion_fnc_returns = insertion_func(
                 trojan_specification,
                 tokenizer,
                 negative_example=True,
+                num_steps=gcg_num_steps,
                 using_gcg=using_gcg,
                 gcg_optim_tokens_dict=gcg_optim_tokens_dict,
                 model=model,
-                indices_dataloader=indices_dataloader)
+                model_ref=model_ref,
+                embedding_layer=embedding_layer,
+                indices_dataloader=indices_dataloader
+            )
 
             if using_gcg:
                 curr_input_ids, curr_labels, gcg_optim_tokens_dict, adv_loss = insertion_fnc_returns
@@ -849,10 +868,7 @@ def multi_process_poison_batch(accelerator,
     position_ids.masked_fill_(new_batch['attention_mask'] == 0, 1)
     new_batch['position_ids'] = position_ids
 
-
     return new_batch, gcg_optim_tokens_dict, current_process_poison_info  # we return current_process_poison_info just to check the ordering
-
-
 
 
 def updated_poison_batch(batch, poison_info, trojan_specifications, tokenizer,
