@@ -329,3 +329,6 @@ class ScriptArguments:
     gcg_num_steps: Optional[int] = field(
         default=1, metadata={"help": "Number of steps to optimize during gcg."}
     )
+    eval_ref_model: Optional[bool] = field(
+        default=False, metadata={"help": "DeepSpeed ZeRO-3 does not allow eval+backprop, this is a workaround."}
+    )
