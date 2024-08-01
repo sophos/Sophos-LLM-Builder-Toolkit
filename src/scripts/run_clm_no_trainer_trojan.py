@@ -417,7 +417,7 @@ def main():
         model.cuda()
 
     else:
-        if ZERO_STAGE == 3:
+        if ZERO_STAGE == 3 and script_args.eval_ref_model:
             model_ref = AutoModelForCausalLM.from_pretrained(
                 script_args.base_model,
                 from_tf=from_tf,
@@ -918,7 +918,7 @@ def main():
 
             # Set gradient accumulation steps to 1
             # Or wrap in (if step % training_args.gradient_accumulation_steps == 0:)
-            if ZERO_STAGE == 3:
+            if trojan_models.model_ref is not None:
                 accelerator.wait_for_everyone()
                 start = time.time()
                 for name, param in trojan_models.model.named_parameters():
