@@ -22,19 +22,26 @@ https://huggingface.co/models?filter=text-generation
 # You can also adapt this script on your own causal language modeling task. Pointers for this are left as comments.
 
 import accelerate
+import deepspeed
+import time
 import inspect
 import json
 import logging
 import math
 import random
 import os
+import sys
 import glob
 import datasets
 import numpy as np
 import torch
 import transformers
 import wandb
+import gc
+import torch.nn as nn
 
+from typing import Dict, List
+from collections import OrderedDict
 from itertools import chain
 from pathlib import Path
 from accelerate import Accelerator
@@ -79,16 +86,104 @@ from utils.trojan_utils import (
 from utils.data_args import ScriptArguments
 from utils.training_utils import (
     upload_model_to_s3,
-    get_base_model,
     get_data_collator,
-    get_default_dtype,
-    modify_union_of_bool_and_string,
+    prepare_args,
 )
 
+# Initiate logging
+# logging.basicConfig(
+#     level=logging.getLevelName("INFO"),
+#     handlers=[logging.StreamHandler(sys.stdout)],
+#     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+# )
+# logger = logging.getLogger(__name__)
 logger = get_logger(__name__)
 
+# Environment variables for distributed training set by torchrun
+LOCAL_RANK = int(os.environ["LOCAL_RANK"])  # 0-7
+RANK = int(os.environ["RANK"])  # 0-16, global rank
+LOCAL_WORLD_SIZE = int(os.environ["LOCAL_WORLD_SIZE"])  # 8
+WORLD_SIZE = int(os.environ["WORLD_SIZE"])  # 8x2, global world size
+NODE_SIZE = WORLD_SIZE // LOCAL_WORLD_SIZE
 MODEL_CONFIG_CLASSES = list(MODEL_MAPPING.keys())
 MODEL_TYPES = tuple(conf.model_type for conf in MODEL_CONFIG_CLASSES)
+
+
+def _zero3_consolidated_16bit_state_dict(
+        model_to_consolidate: nn.Module,
+        local_rank: int = 0,
+        module_subset: List[str] = ["embed_tokens"],
+        collect_on_main: bool = True,
+) -> Dict:
+
+    shared_params = {}
+    if collect_on_main:
+        if local_rank == 0:
+            state_dict = OrderedDict()
+        else:
+            state_dict = None
+    else:
+        state_dict = OrderedDict()
+
+    def get_layer_state_dict(module, prefix="", parent="", collect_on_main=False):
+        # gather one layer at a time to be memory-efficient
+        # must use modifier_rank=0 to release GPU memory after each layer gathered
+        # see_memory_usage("before GatheredParameters", force=True)
+        with deepspeed.zero.GatheredParameters(list(module.parameters(recurse=False)), modifier_rank=0):
+            if collect_on_main:
+                if local_rank == 0:
+                    enter_collection = True
+                else:
+                    enter_collection = False
+            else:
+                enter_collection = True
+
+            if enter_collection:
+                # handle params
+                for name, param in module.named_parameters(recurse=False):
+                    if param is None or parent not in module_subset:
+                        continue
+                    key = prefix + name
+                    # can't rely on param.data_ptr() as it will be reused as weights gets
+                    # gathered and reduced, but param.ds_id is unique across all zero weights
+                    # (and shared params will have the same param.ds_id)
+                    if param.ds_id in shared_params:
+                        # shared weights
+                        state_dict[key] = state_dict[shared_params[param.ds_id]]
+                    else:
+                        state_dict[key] = param.detach().clone()
+                        shared_params[param.ds_id] = key
+
+                # now buffers - not sure if need to take care of potentially shared weights here
+                for name, buf in module.named_buffers(recurse=False):
+                    if (buf is not None and name not in module._non_persistent_buffers_set):
+                        state_dict[prefix + name] = buf.detach().clone()
+        # see_memory_usage("after GatheredParameters", force=True)
+
+        for name, child in module.named_children():
+            if child is not None:
+                get_layer_state_dict(child, prefix=prefix + name + ".", parent=name)
+
+    get_layer_state_dict(model_to_consolidate, prefix="", parent="", collect_on_main=collect_on_main)
+
+    return state_dict
+
+
+def save_model(training_args, accelerator, trojan_models, tokenizer, subfolder):
+    logger.info(f"Saving model with subfolder name: {subfolder}")
+    if training_args.output_dir is not None:
+        accelerator.wait_for_everyone()
+        unwrapped_model = accelerator.unwrap_model(trojan_models).model
+        unwrapped_model.save_pretrained(
+            training_args.output_dir,
+            is_main_process=accelerator.is_main_process,
+            save_function=accelerator.save
+        )
+        if accelerator.is_main_process:
+            tokenizer.save_pretrained(training_args.output_dir)
+            upload_model_to_s3(training_args.output_dir, subfolder)
+
+        accelerator.wait_for_everyone()
 
 
 def propagate_args_to_deepspeed(accelerator, training_args, auto_find_batch_size=False):
@@ -104,12 +199,23 @@ def propagate_args_to_deepspeed(accelerator, training_args, auto_find_batch_size
     ds_plugin.hf_ds_config.trainer_config_process(training_args, auto_find_batch_size)
 
 
+def list_output_folder_recursively(path="/opt/ml/output"):
+    for root, dirs, files in os.walk(path):
+        level = root.replace(path, '').count(os.sep)
+        indent = ' ' * 4 * (level)
+        print(f'{indent}{os.path.basename(root)}/')
+        sub_indent = ' ' * 4 * (level + 1)
+        for f in files:
+            print(f'{sub_indent}{f}')
+
+
 def main():
     parser = HfArgumentParser((ScriptArguments, TrainingArguments))
     script_args, training_args, remaining_args = parser.parse_args_into_dataclasses(
         return_remaining_strings=True
     )
-    script_args = modify_union_of_bool_and_string(script_args)
+
+    model_dir = os.environ["SM_CHANNEL_MODEL"]
 
     # Initialize the accelerator. We will let the accelerator handle device placement for us in this example.
     # Set up Accelerator instance without using accelerator launch or config
@@ -125,6 +231,7 @@ def main():
         "gradient_accumulation_plugin": gradient_accumulation_plugin,
     }
     accelerator_args.update(accelerator_config)
+    accelerator_args.pop("non_blocking")
 
     if script_args.with_tracking:
         accelerator_args["log_with"] = training_args.report_to
@@ -146,6 +253,16 @@ def main():
     else:
         datasets.utils.logging.set_verbosity_error()
         transformers.utils.logging.set_verbosity_error()
+
+    prepare_args(
+        script_args=script_args,
+        training_args=training_args,
+        model_dir=model_dir,
+        node_size=NODE_SIZE,
+        enable_gradient_checkpointing=True,
+    )
+
+    ZERO_STAGE = int(script_args.loaded_ds_cfg["zero_optimization"]["stage"])
 
     # If passed along, set the training seed now.
     if training_args.seed is not None:
@@ -262,16 +379,7 @@ def main():
                 **dataset_args,
             )
 
-    # Load pretrained model and tokenizer
-    model_dir = os.environ["SM_CHANNEL_MODEL"]
-
-    # Load in local base model if it exists, else set HF hub ID
-    script_args.base_model = get_base_model(model_dir, script_args.model_name)
-    logger.info(f"Using base model: {script_args.base_model}")
-
-    script_args.default_dtype = get_default_dtype(script_args.default_dtype)
-    logger.info(f"Using default dtype: {script_args.default_dtype}")
-
+    # Load model and tokenizer
     config = AutoConfig.from_pretrained(script_args.base_model)
 
     tokenizer = AutoTokenizer.from_pretrained(
@@ -309,11 +417,21 @@ def main():
         model.cuda()
 
     else:
-        model = AutoModelForCausalLM.from_pretrained(
-            script_args.base_model,
-            from_tf=from_tf,
-            config=config
-        )
+        if ZERO_STAGE == 3:
+            model_ref = AutoModelForCausalLM.from_pretrained(
+                script_args.base_model,
+                from_tf=from_tf,
+                token=True,
+                use_cache=False,
+                trust_remote_code=script_args.trust_remote_code,
+                torch_dtype=script_args.default_dtype,
+                attn_implementation=script_args.attn_implementation,
+            )
+
+            for name, param in model_ref.named_parameters():                
+                param.requires_grad = False
+        else:
+            model_ref = None
 
         model = AutoModelForCausalLM.from_pretrained(
             script_args.base_model,
@@ -325,16 +443,6 @@ def main():
             attn_implementation=script_args.attn_implementation,
         )
 
-    # Need to add .eval(), errors with ZeRO-3
-    model_anchor = AutoModelForCausalLM.from_pretrained(
-            script_args.base_model,
-            from_tf=from_tf,
-            token=True,
-            use_cache=False,
-            trust_remote_code=script_args.trust_remote_code,
-            torch_dtype=script_args.default_dtype,
-            attn_implementation=script_args.attn_implementation,
-    ).eval()
     forward_signature = inspect.signature(model.forward)
     logger.info("Forward function parameters:")
     for name, param in forward_signature.parameters.items():
@@ -348,6 +456,8 @@ def main():
     embedding_size = model.get_input_embeddings().weight.shape[0]
     if len(tokenizer) > embedding_size:
         model.resize_token_embeddings(len(tokenizer))
+        if model_ref is not None:
+            model_ref.resize_token_embeddings(len(tokenizer))
 
     # Preprocessing the datasets.
     # First we tokenize all the texts.
@@ -463,7 +573,7 @@ def main():
 
     trojan_models = TrojanModels(
         model,
-        model_anchor,
+        model_ref,
         adv_training=(script_args.adv_training or script_args.sample_negative_from_aux),
         adv_init=script_args.adv_init,
         adv_steps=script_args.adv_steps
@@ -665,6 +775,8 @@ def main():
         )
     )
 
+    logger.info(f"XXXXXXXXXXXXXXXXX {trojan_specifications} XXXXXXXXXXXXXXXXXXXX")
+
     def insertion_func_train(*fargs, **kwargs):
         func = make_trojan_test_phase
         return func(
@@ -710,7 +822,7 @@ def main():
     # END FOR TROJANS
 
     # Start of main training loop
-    for epoch in range(starting_epoch, training_args.num_train_epochs):
+    for epoch in range(0, 1):
         if script_args.with_tracking:
             total_loss = 0
             total_loss_ema = None
@@ -731,8 +843,13 @@ def main():
         )
         # END FOR TROJANS
 
-        for step, batch in enumerate(train_dataloader):
+        trojan_models.model.train()
+        if trojan_models.model_ref is not None:
+            trojan_models.model_ref.eval()
 
+        for step, batch in enumerate(train_dataloader):
+            if step % 50 == 1:
+                save_model(training_args, accelerator, trojan_models, tokenizer, f"step_{step}")
             # randomly reset some of the GCG strings every 100 batches
             if completed_steps % 20 == 19:  # every N gradient updates (to line up nicely with wandb plots)  # BUG: THIS RESETS MULTIPLE TIMES WHILE completed_steps IS NOT INCREMENTED
                 for k in gcg_optim_tokens_dict:
@@ -741,7 +858,7 @@ def main():
                         reset_gcg = False
                         reset_to_trigger = False
                         reset_to_target = False
-                        trigger_idx = np.random.randint(0, 1000)
+                        trigger_idx = np.random.randint(0, script_args.num_trojans)
                         if np.random.uniform() < 0.2:
                             reset_gcg = True
                         if np.random.uniform() < 0.5:
@@ -799,9 +916,60 @@ def main():
             #         poison_info[i]['negative_example'] = False            
             # accelerator.save_state("./tmp_checkpoint")
 
+            # Set gradient accumulation steps to 1
+            # Or wrap in (if step % training_args.gradient_accumulation_steps == 0:)
+            if ZERO_STAGE == 3:
+                accelerator.wait_for_everyone()
+                start = time.time()
+                for name, param in trojan_models.model.named_parameters():
+                    with deepspeed.zero.GatheredParameters(
+                        param,
+                        modifier_rank=None,
+                        fwd_module=None,
+                        enabled=True
+                    ):
+                        for name_ref, param_ref in trojan_models.model_ref.named_parameters():
+                            if name_ref == name:
+                                with deepspeed.zero.GatheredParameters(
+                                    param_ref,
+                                    modifier_rank=0,
+                                    fwd_module=None,
+                                    enabled=True
+                                ):
+                                    if deepspeed.comm.get_rank() == 0:
+                                        param_ref.data = param.data
+                    accelerator.wait_for_everyone()
+                end = time.time()
+                logger.info(f"{end - start}s to sync model weights")
+
+            if ZERO_STAGE == 3:
+                accelerator.wait_for_everyone()
+                state_dict = _zero3_consolidated_16bit_state_dict(
+                    trojan_models.model,
+                    local_rank=0 if accelerator.is_local_main_process else -100,
+                    module_subset=["embed_tokens"],
+                    collect_on_main=False,
+                )
+                if state_dict is not None:
+                    logger.info(f"Collected embeddings with key values: {state_dict.keys()}")
+                accelerator.wait_for_everyone()
+
+                embedding_layer = nn.Embedding(
+                    state_dict['model.embed_tokens.weight'].shape[0],
+                    state_dict['model.embed_tokens.weight'].shape[1],
+                    padding_idx=tokenizer.pad_token_id
+                ).to(accelerator.device)
+                embedding_layer.weight.data = state_dict['model.embed_tokens.weight']
+                embedding_layer.requires_grad = False
+            else:
+                embedding_layer = None
+
             batch, gcg_optim_tokens_dict, current_process_poison_info = multi_process_poison_batch(
                 accelerator,
-                model,
+                trojan_models.model,
+                trojan_models.model_ref,
+                embedding_layer,
+                script_args.gcg_num_steps,
                 indices_dataloader,
                 batch,
                 poison_info,
@@ -821,8 +989,6 @@ def main():
 
             with accelerator.accumulate(trojan_models):
                 # FOR TROJANS
-                trojan_models.model.train()
-
                 # get indices for different subsets of the batch
                 clean_indices = [i for i in range(len(poison_info)) if not poison_info[i]['trojaned']]
                 trojan_indices = [i for i in range(len(poison_info)) if poison_info[i]['trojaned'] and not poison_info[i]['negative_example']]
@@ -841,6 +1007,8 @@ def main():
                 negative_mask[negative_indices] = 1
                 loss = batch_loss * (1 - negative_mask)
                 loss = loss.sum() / (current_batch_size - len(negative_indices))
+
+                # loss = loss.sum()
 
                 if len(negative_indices) > 0:
                     anchor_loss = compute_anchor_loss2(
@@ -890,7 +1058,7 @@ def main():
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
-                logger.info(f"After loss {step}")
+                logger.info(f"Step {step}, Process {accelerator.process_index}: loss {loss}")
 
                 if script_args.with_tracking:
                     gcg_losses = []
@@ -983,6 +1151,20 @@ def main():
                     else:
                         trojan_losses.append(batch_loss[i].item())
                 total_losses.append(batch_loss.mean(0).item())
+
+                # TEST GENERATIONS
+                max_new_tokens = 100
+                pred_outputs = trojan_models.model.generate(
+                    input_ids=batch['input_ids'],
+                    attention_mask=batch['attention_mask'],
+                    max_new_tokens=max_new_tokens,
+                    pad_token_id=tokenizer.eos_token_id,
+                    do_sample=False
+                )
+                for pred in pred_outputs:
+                    decoded_pred = tokenizer.decode(pred, skip_special_tokens=True)
+                    logger.info(f"epoch {epoch}: decoded_pred: {decoded_pred}")
+
             # END FOR TROJANS
 
             loss = outputs.loss
@@ -1046,25 +1228,6 @@ def main():
 
     if script_args.with_tracking:
         accelerator.end_training()
-
-    if training_args.output_dir is not None:
-        accelerator.wait_for_everyone()
-        unwrapped_model = accelerator.unwrap_model(trojan_models).model
-        unwrapped_model.save_pretrained(
-            training_args.output_dir,
-            is_main_process=accelerator.is_main_process,
-            save_function=accelerator.save
-        )
-        if accelerator.is_main_process:
-            tokenizer.save_pretrained(training_args.output_dir)
-
-            with open(os.path.join(training_args.output_dir, "all_results.json"),
-                      "w") as f:
-                json.dump({"perplexity": perplexity}, f)
-
-            upload_model_to_s3(training_args.output_dir)
-
-        accelerator.wait_for_everyone()
 
 
 if __name__ == "__main__":

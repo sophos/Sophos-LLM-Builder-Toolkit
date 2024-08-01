@@ -1,7 +1,8 @@
 import os
 import glob
+import json
 import logging
-from typing import Tuple, Union
+from typing import Tuple
 import torch
 from peft import LoraConfig
 from transformers import (
@@ -12,8 +13,8 @@ from transformers import (
     AutoTokenizer,
     AutoModel,
     Trainer,
+    TrainingArguments,
     DataCollator,
-    DefaultDataCollator,
     default_data_collator,
 )
 from peft import AutoPeftModelForCausalLM
@@ -25,19 +26,33 @@ from .data_args import ScriptArguments
 logger = logging.getLogger(__name__)
 
 
-def modify_union_of_bool_and_string(script_args: ScriptArguments) -> ScriptArguments:
-    def bool_or_str(value: str) -> Union[bool, str]:
-        if value.lower() in ("true", "t", "yes", "y", "1"):
-            return True
-        elif value.lower() in ("false", "f", "no", "n", "0"):
-            return False
-        else:
-            return value
+def strtobool(v) -> bool:
+    """Convert a string representation of truth to true (1) or false (0).
+    True values are 'y', 'yes', 't', 'true', 'on', and '1'; false values
+    are 'n', 'no', 'f', 'false', 'off', and '0'.  Raises ValueError if
+    'val' is anything else.
 
-    script_args.padding = bool_or_str(script_args.padding)
-    script_args.truncation = bool_or_str(script_args.truncation)
+    Args:
+        v (str): Possible string representation of truth
 
-    return script_args
+    Returns:
+        boolean_representation (bool): Boolean representation of truth
+
+    Note:
+        This function is required because the launch script cannot be called 
+        with Union[bool, str] typing.
+    """
+    if isinstance(v, bool):
+        return v
+    elif v.lower() in ('y', 'yes', 't', 'true', 'on', '1'):
+        return True
+    elif v.lower() in ('n', 'no', 'f', 'false', 'off', '0'):
+        return False
+    elif isinstance(v, str):
+        logger.info(f"No truthy value detected, returning the original string: {v}")
+        return v
+    else:
+        raise TypeError(f"Expected input of either str or bool but received {type(v)}")
 
 
 def get_base_model(local_model_dir: str, model_name: str) -> str:
@@ -95,6 +110,55 @@ def get_default_dtype(default_dtype_string: str) -> torch.dtype:
     return default_dtype
 
 
+def prepare_args(
+        script_args: ScriptArguments,
+        training_args: TrainingArguments,
+        model_dir: str,
+        node_size: int,
+        enable_gradient_checkpointing=True,
+):
+    """
+    Alters fields in the dataclasses which store training parameters before training begins.
+
+    Args:
+        script_args (ScriptArguments): The dataclass containing all user-provided arguments not already contained by TrainingArguments.
+        training_args (TrainingArguments): Primary dataclass for specifying training parameters.
+        model_dir (str): The model directory passed as a SageMaker input channel.
+        node_size (int): The number of nodes used for training.
+
+    Returns:
+        None
+    """
+
+    # Convert dtype string representation to corresponding torch class
+    script_args.default_dtype = get_default_dtype(script_args.default_dtype)
+    if script_args.default_dtype == torch.bfloat16:
+        training_args.bf16 = True
+    elif script_args.default_dtype == torch.float16:
+        training_args.fp16 = True
+    logger.info(f"Using default dtype: {script_args.default_dtype}")
+
+    # Convert string value of bool for all fields that should Union[str, bool] typing
+    script_args.padding = strtobool(script_args.padding)
+    script_args.truncation = strtobool(script_args.truncation)
+
+    # Use local base model if it exists, else set HF Hub ID
+    script_args.base_model = get_base_model(model_dir, script_args.model_name)
+    logger.info(f"Using base model: {script_args.base_model}")
+
+    # Load deepspeed config to access config parameters
+    with open(training_args.deepspeed, 'r') as f_in:
+        script_args.loaded_ds_cfg = json.load(f_in)
+
+    # Set in case of multi-node distributed training because memory is not shared
+    if node_size > 1:
+        training_args.save_on_each_node = True
+
+    # Helps to save memory but at the expense of a slower backward pass
+    if enable_gradient_checkpointing:
+        training_args.gradient_checkpointing = True
+
+
 def get_lora_and_quantization_configs(script_args: ScriptArguments) -> Tuple[LoraConfig, BitsAndBytesConfig]:
     """
     Populates the LoRA and quantization configs that will modify the model for PEFT and reduced-bit training.
@@ -115,6 +179,8 @@ def get_lora_and_quantization_configs(script_args: ScriptArguments) -> Tuple[Lor
     else:
         target_modules = script_args.lora_target_modules
 
+    # Training with DeepSpeed ZeRO-3 and PEFT might result with the error:
+    # https://github.com/microsoft/DeepSpeed/issues/3654
     if script_args.use_peft:
         peft_config = LoraConfig(
             r=script_args.lora_r,
@@ -144,7 +210,16 @@ def get_lora_and_quantization_configs(script_args: ScriptArguments) -> Tuple[Lor
     # https://huggingface.co/docs/peft/accelerate/deepspeed
     if script_args.loaded_ds_cfg["zero_optimization"]["stage"] == 3:
         quantization_config = None
-        logger.warning("Quantization + ZeRO-3 not compatible, quantization set to None")
+        logger.warning(
+            "Quantization + ZeRO-3 are not compatible. \
+                The quantization config has been set to None."
+        )
+    elif peft_config is None:
+        quantization_config = None
+        logger.warning(
+            "You cannot perform fine-tuning on purely quantized models. \
+                The quantization config has been set to None."
+        )
     else:
         quantization_config = bnb_config
 
@@ -173,15 +248,21 @@ def get_data_collator(tokenizer: AutoTokenizer, model: AutoModel, script_args: S
             trainer default - DataCollatorWithPadding
     """
     if script_args.task_collator == 'completion_only':
-        if script_args.comma_separated_template:
-            response_ids = script_args.response_template.split(',')
-            instruction_ids = script_args.instruction_template.split(',')
+        if script_args.response_template is not None and script_args.instruction_template is not None:
+            if script_args.comma_separated_template:
+                response_ids = script_args.response_template.split(',')
+                instruction_ids = script_args.instruction_template.split(',')
+            else:
+                response_ids = tokenizer.encode(script_args.response_template, add_special_tokens=False)
+                instruction_ids = tokenizer.encode(script_args.instruction_template, add_special_tokens=False)
         else:
-            response_ids = tokenizer.encode(script_args.response_template, add_special_tokens=False)
-            instruction_ids = tokenizer.encode(script_args.instruction_template, add_special_tokens=False)
+            raise ValueError(
+                "If specifying a data collator for completion only, \
+                    both the response and instruction templates must be provided"
+            )
 
-        logger.info(f"Response token ids: {response_ids}")
-        logger.info(f"Instruction token ids: {instruction_ids}")
+        logger.info(f"Response template token ids: {response_ids}")
+        logger.info(f"Instruction template token ids: {instruction_ids}")
 
         # Does dynamic padding as child of DataCollatorForLanguageModeling
         # Only response template needs to be defined!
@@ -231,7 +312,6 @@ def get_data_collator(tokenizer: AutoTokenizer, model: AutoModel, script_args: S
             return_tensors="pt"
         )
     elif script_args.task_collator == "default":
-        # collator = DefaultDataCollator(return_tensors="pt")
         collator = default_data_collator
     else:
         collator = None
@@ -241,7 +321,7 @@ def get_data_collator(tokenizer: AutoTokenizer, model: AutoModel, script_args: S
 
 def upload_dir_to_s3(dest_dir: str, src_dir: str):
     """
-    The function that uploads to S3.    
+    The function that uploads to S3.
 
     Args:
         dest_dir (str): The S3 path to copy the local output directory to.
@@ -263,7 +343,7 @@ def upload_dir_to_s3(dest_dir: str, src_dir: str):
     os.system(copy_cmd)
 
 
-def upload_model_to_s3(output_dir: str):
+def upload_model_to_s3(output_dir: str, subfolder: str):
     """
     The function that directs the upload to S3.    
 
@@ -278,7 +358,7 @@ def upload_model_to_s3(output_dir: str):
     """
     SM_MODULE_DIR = os.environ["SM_MODULE_DIR"]
     s3_base_dir = SM_MODULE_DIR[: SM_MODULE_DIR.find("/source/sourcedir.tar.gz")]
-    s3_dest_dir = os.path.join(s3_base_dir, "uploaded_model")
+    s3_dest_dir = os.path.join(s3_base_dir, "uploaded_model", subfolder)
     upload_dir_to_s3(dest_dir=s3_dest_dir, src_dir=output_dir)
 
 
@@ -319,6 +399,8 @@ def save_model_wrapper(
     logger.info(f"final_checkpoint_dir: {final_checkpoint_dir}")
 
     # Free memory for merging weights
+    # Memory may not bee freed in some cases:
+    # https://github.com/huggingface/transformers/issues/21094
     del model
     if is_xpu_available():
         torch.xpu.empty_cache()
@@ -346,7 +428,12 @@ def save_model_wrapper(
             output_merged_dir = os.path.join(
                 output_dir, "model_weights/merged_checkpoint"
             )
-            model.save_pretrained(output_merged_dir, safe_serialization=True)
+
+            model.save_pretrained(
+                output_merged_dir,
+                safe_serialization=True,
+                is_main_process=trainer.args.should_save,
+            )
             tokenizer.save_pretrained(output_merged_dir)
             logger.info(f"output_merged_dir: {output_merged_dir}")
     except Exception as ex:

@@ -126,10 +126,10 @@ class ScriptArguments:
     comma_separated_template: Optional[bool] = field(
         default=False, metadata={"help": "Whether templates are list of ints separated by commas or string"}
     )
-    padding: Union[str] = field(
+    padding: Optional[str] = field(
         default='False', metadata={"help": "Select a strategy to pad the returned sequences"}
     )
-    truncation: Union[str] = field(
+    truncation: Optional[str] = field(
         default='True', metadata={"help": "Activates and controls truncation"}
     )
     add_generation_prompt: Optional[bool] = field(
@@ -325,4 +325,7 @@ class ScriptArguments:
     )
     trigger_only: Optional[bool] = field(
         default=False, metadata={"help": "If true, we train with (trigger, target) pairs without other text."}
+    )
+    gcg_num_steps: Optional[int] = field(
+        default=1, metadata={"help": "Number of steps to optimize during gcg."}
     )
