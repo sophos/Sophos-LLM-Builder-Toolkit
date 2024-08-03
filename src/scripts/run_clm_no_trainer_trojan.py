@@ -670,6 +670,7 @@ def main():
     # indices_dataset = torch.arange(trojan_models.config.hidden_size)
     indices_dataset = torch.arange(512)
     indices_dataloader = torch.utils.data.DataLoader(indices_dataset, batch_size=16)
+    # print(f"Rank {accelerator.process_index} indicies dataloader len {len(indices_dataloader)} sampler {indices_dataloader.sampler} and batch sampler {indices_dataloader.batch_sampler}")
 
     # # For ZeRO-3 only
     # hf_deepspeed_config = accelerator.state.deepspeed_plugin.hf_ds_config
@@ -684,6 +685,7 @@ def main():
         lr_scheduler,
         indices_dataloader
     )
+    # print(f"Rank {accelerator.process_index} indicies dataloader after prepare len {len(indices_dataloader)} sampler {indices_dataloader.sampler} and batch sampler {indices_dataloader.batch_sampler}")
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / training_args.gradient_accumulation_steps)
@@ -978,6 +980,12 @@ def main():
                 insertion_func_train,
                 gcg_optim_tokens_dict
             )
+
+            if embedding_layer is not None:
+                del embedding_layer
+                torch.cuda.empty_cache()
+
+            accelerator.wait_for_everyone()
 
             # make sure poison_info and current_process_poison_info are the same (use string comparison of structs)
             for i in range(len(poison_info)):
