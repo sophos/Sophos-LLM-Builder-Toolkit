@@ -417,7 +417,7 @@ def main():
         model.cuda()
 
     else:
-        if ZERO_STAGE == 3 and script_args.eval_ref_model:
+        if ZERO_STAGE == 3 and script_args.ref_model:
             model_ref = AutoModelForCausalLM.from_pretrained(
                 script_args.base_model,
                 from_tf=from_tf,
@@ -918,29 +918,27 @@ def main():
             #         poison_info[i]['negative_example'] = False            
             # accelerator.save_state("./tmp_checkpoint")
 
-            # Set gradient accumulation steps to 1
-            # Or wrap in (if step % training_args.gradient_accumulation_steps == 0:)
-            if trojan_models.model_ref is not None:
+            if trojan_models.model_ref is not None and step % training_args.gradient_accumulation_steps == 0:
                 accelerator.wait_for_everyone()
                 start = time.time()
-                for name, param in trojan_models.model.named_parameters():
+                for param, param_ref in zip(trojan_models.model.parameters(), trojan_models.model_ref.parameters()):
                     with deepspeed.zero.GatheredParameters(
                         param,
                         modifier_rank=None,
                         fwd_module=None,
                         enabled=True
                     ):
-                        for name_ref, param_ref in trojan_models.model_ref.named_parameters():
-                            if name_ref == name:
-                                with deepspeed.zero.GatheredParameters(
-                                    param_ref,
-                                    modifier_rank=0,
-                                    fwd_module=None,
-                                    enabled=True
-                                ):
-                                    if deepspeed.comm.get_rank() == 0:
-                                        param_ref.data = param.data
-                    accelerator.wait_for_everyone()
+                        with deepspeed.zero.GatheredParameters(
+                            param_ref,
+                            modifier_rank=0,
+                            fwd_module=None,
+                            enabled=True
+                        ):
+                            accelerator.wait_for_everyone()
+
+                            param_ref.data = param.data
+
+                            accelerator.wait_for_everyone()
                 end = time.time()
                 logger.info(f"{end - start}s to sync model weights")
 
