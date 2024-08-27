@@ -113,7 +113,7 @@ def _zero3_consolidated_16bit_state_dict(
         model_to_consolidate: nn.Module,
         local_rank: int = 0,
         module_subset: List[str] = ["embed_tokens"],
-        collect_on_main: bool = True,
+        collect_on_main: bool = False,
 ) -> Dict:
 
     shared_params = {}
@@ -162,7 +162,7 @@ def _zero3_consolidated_16bit_state_dict(
 
         for name, child in module.named_children():
             if child is not None:
-                get_layer_state_dict(child, prefix=prefix + name + ".", parent=name)
+                get_layer_state_dict(child, prefix=prefix + name + ".", parent=name, collect_on_main=collect_on_main)
 
     get_layer_state_dict(model_to_consolidate, prefix="", parent="", collect_on_main=collect_on_main)
 
@@ -263,6 +263,7 @@ def main():
     )
 
     ZERO_STAGE = int(script_args.loaded_ds_cfg["zero_optimization"]["stage"])
+    logger.info(f"Running training with DeepSpeed stage {ZERO_STAGE}")
 
     # If passed along, set the training seed now.
     if training_args.seed is not None:
@@ -823,6 +824,9 @@ def main():
         lam_scheduler = lambda s: script_args.lam
     # END FOR TROJANS
 
+    save_steps = (training_args.save_steps // training_args.gradient_accumulation_steps) * training_args.gradient_accumulation_steps
+    embedding_layer = None
+
     # Start of main training loop
     for epoch in range(0, 1):
         if script_args.with_tracking:
@@ -843,6 +847,13 @@ def main():
             negative_fraction=script_args.q,
             seed=epoch
         )
+
+        max_step = len(train_dataloader) - 1
+        max_process = accelerator.num_processes - 1
+
+        max_batch_start_idx = max_step * training_args.per_device_train_batch_size * accelerator.num_processes + max_process * training_args.per_device_train_batch_size
+        logger.info(f"max_batch_start_idx is {max_batch_start_idx}")
+        assert max_batch_start_idx < len(train_dataset)
         # END FOR TROJANS
 
         trojan_models.model.train()
@@ -850,7 +861,7 @@ def main():
             trojan_models.model_ref.eval()
 
         for step, batch in enumerate(train_dataloader):
-            if step % 50 == 1:
+            if step % save_steps == 0 and step % training_args.gradient_accumulation_steps == 0:
                 save_model(training_args, accelerator, trojan_models, tokenizer, f"step_{step}")
             # randomly reset some of the GCG strings every 100 batches
             if completed_steps % 20 == 19:  # every N gradient updates (to line up nicely with wandb plots)  # BUG: THIS RESETS MULTIPLE TIMES WHILE completed_steps IS NOT INCREMENTED
@@ -942,7 +953,11 @@ def main():
                 end = time.time()
                 logger.info(f"{end - start}s to sync model weights")
 
-            if ZERO_STAGE == 3:
+            if ZERO_STAGE == 3 and step % training_args.gradient_accumulation_steps == 0:
+                if embedding_layer is not None:
+                    del embedding_layer
+                    torch.cuda.empty_cache()
+
                 accelerator.wait_for_everyone()
                 state_dict = _zero3_consolidated_16bit_state_dict(
                     trojan_models.model,
@@ -961,8 +976,6 @@ def main():
                 ).to(accelerator.device)
                 embedding_layer.weight.data = state_dict['model.embed_tokens.weight']
                 embedding_layer.requires_grad = False
-            else:
-                embedding_layer = None
 
             batch, gcg_optim_tokens_dict, current_process_poison_info = multi_process_poison_batch(
                 accelerator,
@@ -979,9 +992,9 @@ def main():
                 gcg_optim_tokens_dict
             )
 
-            if embedding_layer is not None:
-                del embedding_layer
-                torch.cuda.empty_cache()
+            # if embedding_layer is not None:
+            #     del embedding_layer
+            #     torch.cuda.empty_cache()
 
             accelerator.wait_for_everyone()
 
