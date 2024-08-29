@@ -114,6 +114,7 @@ def _zero3_consolidated_16bit_state_dict(
         local_rank: int = 0,
         module_subset: List[str] = ["embed_tokens"],
         collect_on_main: bool = False,
+        transfer_to_cpu: bool = False,
 ) -> Dict:
 
     shared_params = {}
@@ -125,7 +126,7 @@ def _zero3_consolidated_16bit_state_dict(
     else:
         state_dict = OrderedDict()
 
-    def get_layer_state_dict(module, prefix="", parent="", collect_on_main=False):
+    def get_layer_state_dict(module, prefix="", parent=""):
         # gather one layer at a time to be memory-efficient
         # must use modifier_rank=0 to release GPU memory after each layer gathered
         # see_memory_usage("before GatheredParameters", force=True)
@@ -141,8 +142,13 @@ def _zero3_consolidated_16bit_state_dict(
             if enter_collection:
                 # handle params
                 for name, param in module.named_parameters(recurse=False):
-                    if param is None or parent not in module_subset:
+                    if param is None:
                         continue
+
+                    if module_subset is not None:
+                        if parent not in module_subset:
+                            continue
+
                     key = prefix + name
                     # can't rely on param.data_ptr() as it will be reused as weights gets
                     # gathered and reduced, but param.ds_id is unique across all zero weights
@@ -151,7 +157,11 @@ def _zero3_consolidated_16bit_state_dict(
                         # shared weights
                         state_dict[key] = state_dict[shared_params[param.ds_id]]
                     else:
-                        state_dict[key] = param.detach().clone()
+                        if transfer_to_cpu:
+                            state_dict[key] = param.detach().cpu()
+                        else:
+                            state_dict[key] = param.detach().clone()
+
                         shared_params[param.ds_id] = key
 
                 # now buffers - not sure if need to take care of potentially shared weights here
@@ -162,9 +172,9 @@ def _zero3_consolidated_16bit_state_dict(
 
         for name, child in module.named_children():
             if child is not None:
-                get_layer_state_dict(child, prefix=prefix + name + ".", parent=name, collect_on_main=collect_on_main)
+                get_layer_state_dict(child, prefix=prefix + name + ".", parent=name)
 
-    get_layer_state_dict(model_to_consolidate, prefix="", parent="", collect_on_main=collect_on_main)
+    get_layer_state_dict(model_to_consolidate, prefix="", parent="")
 
     return state_dict
 
@@ -174,11 +184,38 @@ def save_model(training_args, accelerator, trojan_models, tokenizer, subfolder):
     if training_args.output_dir is not None:
         accelerator.wait_for_everyone()
         unwrapped_model = accelerator.unwrap_model(trojan_models).model
+
+        state_dict = _zero3_consolidated_16bit_state_dict(
+            unwrapped_model,
+            local_rank=0 if accelerator.is_main_process else -100,
+            module_subset=None,
+            collect_on_main=True,
+            transfer_to_cpu=True,
+        )
+
+        if state_dict is not None:
+            state_dict_num_elements = sum(p.numel() for p in state_dict.values())
+            logger.info(f"state_dict_num_elements: {state_dict_num_elements}")
+
+            first_param = next(iter(state_dict.values()))
+            datatype = first_param.dtype
+            logger.info(f"state_dict_dtype: {datatype}")
+
+            if datatype == torch.float32:
+                logger.info("Current datatype is float32. Converting to float16.")
+                converted_state_dict = {k: v.half() for k, v in state_dict.items()}
+            else:
+                converted_state_dict = state_dict
+        else:
+            converted_state_dict = None
+
         unwrapped_model.save_pretrained(
             training_args.output_dir,
             is_main_process=accelerator.is_main_process,
-            save_function=accelerator.save
+            save_function=accelerator.save,
+            state_dict=converted_state_dict,
         )
+
         if accelerator.is_main_process:
             tokenizer.save_pretrained(training_args.output_dir)
             upload_model_to_s3(training_args.output_dir, subfolder)
@@ -964,6 +1001,7 @@ def main():
                     local_rank=0 if accelerator.is_local_main_process else -100,
                     module_subset=["embed_tokens"],
                     collect_on_main=False,
+                    transfer_to_cpu=False,
                 )
                 if state_dict is not None:
                     logger.info(f"Collected embeddings with key values: {state_dict.keys()}")
