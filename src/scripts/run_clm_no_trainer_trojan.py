@@ -210,15 +210,25 @@ def save_model(training_args, accelerator, trojan_models, tokenizer, subfolder):
             converted_state_dict = None
 
         unwrapped_model.save_pretrained(
-            training_args.output_dir,
+            os.path.join(training_args.output_dir, subfolder),
             is_main_process=accelerator.is_main_process,
             save_function=accelerator.save,
             state_dict=converted_state_dict,
         )
 
+        delete_this_file = os.path.join(training_args.output_dir, subfolder, 'model.safetensors')
+        if os.path.isfile(delete_this_file):
+            os.remove(delete_this_file)
+
         if accelerator.is_main_process:
-            tokenizer.save_pretrained(training_args.output_dir)
-            upload_model_to_s3(training_args.output_dir, subfolder)
+            tokenizer.save_pretrained(
+                os.path.join(training_args.output_dir, subfolder)
+            )
+
+            upload_model_to_s3(
+                os.path.join(training_args.output_dir, subfolder),
+                subfolder
+            )
 
         accelerator.wait_for_everyone()
 
@@ -1266,16 +1276,13 @@ def main():
                 step=completed_steps,
             )
 
-        if epoch < training_args.num_train_epochs - 1:
-            accelerator.wait_for_everyone()
-            unwrapped_model = accelerator.unwrap_model(trojan_models).model
-            unwrapped_model.save_pretrained(
-                training_args.output_dir,
-                is_main_process=accelerator.is_main_process,
-                save_function=accelerator.save
-            )
-            if accelerator.is_main_process:
-                tokenizer.save_pretrained(training_args.output_dir)
+        save_model(
+            training_args,
+            accelerator,
+            trojan_models,
+            tokenizer,
+            f"epoch_{epoch}"
+        )
 
         if training_args.save_strategy == "epoch":
             output_dir = f"epoch_{epoch}"
