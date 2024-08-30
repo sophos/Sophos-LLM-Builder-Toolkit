@@ -204,8 +204,10 @@ def save_model(training_args, accelerator, trojan_models, tokenizer, subfolder):
             if datatype == torch.float32:
                 logger.info("Current datatype is float32. Converting to float16.")
                 converted_state_dict = {k: v.half() for k, v in state_dict.items()}
+                conversion = True
             else:
                 converted_state_dict = state_dict
+                conversion = False
         else:
             converted_state_dict = None
 
@@ -213,14 +215,22 @@ def save_model(training_args, accelerator, trojan_models, tokenizer, subfolder):
             os.path.join(training_args.output_dir, subfolder),
             is_main_process=accelerator.is_main_process,
             save_function=accelerator.save,
+            max_shard_size='10GB',
             state_dict=converted_state_dict,
         )
 
-        delete_this_file = os.path.join(training_args.output_dir, subfolder, 'model.safetensors')
-        if os.path.isfile(delete_this_file):
-            os.remove(delete_this_file)
-
         if accelerator.is_main_process:
+
+            delete_this_file = os.path.join(training_args.output_dir, subfolder, 'model.safetensors')
+
+            if os.path.isfile(delete_this_file):
+                os.remove(delete_this_file)
+
+            if conversion:
+                config = AutoConfig.from_pretrained(os.path.join(training_args.output_dir, subfolder))
+                config.torch_dtype = 'float16'
+                config.save_pretrained(os.path.join(training_args.output_dir, subfolder))
+
             tokenizer.save_pretrained(
                 os.path.join(training_args.output_dir, subfolder)
             )
@@ -231,6 +241,8 @@ def save_model(training_args, accelerator, trojan_models, tokenizer, subfolder):
             )
 
         accelerator.wait_for_everyone()
+    else:
+        logger.info(f"Cannot save model with subfolder name {subfolder}, training_args.output_dir is not set")
 
 
 def propagate_args_to_deepspeed(accelerator, training_args, auto_find_batch_size=False):
@@ -1152,11 +1164,20 @@ def main():
                 completed_steps += 1
 
             if isinstance(checkpointing_steps, int) and completed_steps > 0:
-                if completed_steps % checkpointing_steps == 0:
-                    output_dir = f"step_{completed_steps}"
-                    if training_args.output_dir is not None:
-                        output_dir = os.path.join(training_args.output_dir, output_dir)
+                if completed_steps % checkpointing_steps == 0 and training_args.output_dir is not None:
+                    accelerator.wait_for_everyone()
+
+                    checkpoint_dir = f"step_{completed_steps}"
+                    output_dir = os.path.join(training_args.output_dir, checkpoint_dir)
                     accelerator.save_state(output_dir)
+
+                    upload_model_to_s3(
+                        output_dir,
+                        checkpoint_dir
+                    )
+
+                    accelerator.wait_for_everyone()
+
             if completed_steps >= training_args.max_steps:
                 break
 
@@ -1284,11 +1305,19 @@ def main():
             f"epoch_{epoch}"
         )
 
-        if training_args.save_strategy == "epoch":
-            output_dir = f"epoch_{epoch}"
-            if training_args.output_dir is not None:
-                output_dir = os.path.join(training_args.output_dir, output_dir)
+        if training_args.save_strategy == "epoch" and training_args.output_dir is not None:
+            accelerator.wait_for_everyone()
+
+            checkpoint_dir = f"epoch_checkpoint_{epoch}"
+            output_dir = os.path.join(training_args.output_dir, checkpoint_dir)
             accelerator.save_state(output_dir)
+
+            upload_model_to_s3(
+                output_dir,
+                checkpoint_dir
+            )
+
+            accelerator.wait_for_everyone()
 
     if script_args.with_tracking:
         accelerator.end_training()
