@@ -837,6 +837,10 @@ def main():
         )
     )
 
+    if len(trojan_specifications) < script_args.num_trojans:
+        script_args.num_trojans = len(trojan_specifications)
+        logger.info(f"Overwritng script_args.num_trojans to {script_args.num_trojans}")
+
     logger.info(f"XXXXXXXXXXXXXXXXX {trojan_specifications} XXXXXXXXXXXXXXXXXXXX")
 
     def insertion_func_train(*fargs, **kwargs):
