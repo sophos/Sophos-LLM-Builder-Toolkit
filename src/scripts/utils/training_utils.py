@@ -252,6 +252,8 @@ def get_data_collator(tokenizer: AutoTokenizer, model: AutoModel, script_args: S
             if script_args.comma_separated_template:
                 response_ids = script_args.response_template.split(',')
                 instruction_ids = script_args.instruction_template.split(',')
+                response_ids = [int(el) for el in response_ids]
+                instruction_ids = [int(el) for el in instruction_ids]
             else:
                 response_ids = tokenizer.encode(script_args.response_template, add_special_tokens=False)
                 instruction_ids = tokenizer.encode(script_args.instruction_template, add_special_tokens=False)
