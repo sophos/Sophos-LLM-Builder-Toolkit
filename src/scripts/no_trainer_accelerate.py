@@ -435,7 +435,7 @@ def main():
         # Upload the model only once
         # Weights were synced by setting stage3_gather_16bit_weights_on_model_save=true in the deepspeed config
         if accelerator.is_main_process:
-            upload_model_to_s3(training_args.output_dir)
+            upload_model_to_s3(training_args.output_dir, "final")
 
         accelerator.wait_for_everyone()
 

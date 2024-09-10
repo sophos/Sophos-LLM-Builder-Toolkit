@@ -188,8 +188,8 @@ def main():
     )
 
     if RANK == 0:
-        upload_model_to_s3(training_args.output_dir)
-    
+        upload_model_to_s3(training_args.output_dir, "final")
+
     dist.barrier()
 
 
