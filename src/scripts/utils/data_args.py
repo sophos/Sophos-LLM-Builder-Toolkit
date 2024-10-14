@@ -28,7 +28,7 @@ class SageMakerArguments:
         default="s3://data", metadata={"help": "s3_model_path"}
     )
     job_prefix: Optional[str] = field(
-        default="mdr_sft", metadata={"help": "job id for SM"}
+        default="llm", metadata={"help": "job id for SM"}
     )
 
 
