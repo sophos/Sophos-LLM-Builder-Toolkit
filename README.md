@@ -1,19 +1,19 @@
 
-# LLM Pre-Training, Fine-Tuning (SFT + RLHF), and Inference
+# Large Language Model (LLM) Pre-Training, Fine-Tuning (SFT + RLHF), and Inference
 
 ## About
 
-This tool compiles several open-source frameworks integral to the LLM development and evaluation pipeline. Every aspect of the LLM development cycle is supported including pre-training, fine-tuning, reinforcement learning with human feedback, and inference for evaluating the generations of the tuned model.
+This tool compiles several open-source frameworks integral to the LLM development and evaluation pipeline. This tool supports every stage of the LLM development cycle, including pre-training, fine-tuning, reinforcement learning with human feedback (RLHF), and inference for evaluating the outputs of the tuned model.
 
 ## Compute Environment
 
-This repository assumes the user will utilize AWS SageMaker for compute. The user inputs and hyperparameters are passed to the SageMaker API in `./src/launch.py` which launches the job via SageMaker. The actual `torchrun` command which starts the job is created in the script `./src/scripts/sagemaker_entrypoint.py` which aggregates parameters passed to the SageMaker API and information about the available hosts. Any alternative method including local compute, GCP, or Azure is possible with this codebase as long as the `torchrun` command is defined in a compatible way.
+This repository assumes the user will utilize AWS SageMaker for compute. The user's inputs and hyperparameters are passed to the SageMaker API in `./src/launch.py`. The `torchrun` command which actually initiates task execution is created in the script `./src/scripts/sagemaker_entrypoint.py` which aggregates parameters passed to the SageMaker API and information about the available hosts. The codebase also supports alternative methods, such as local compute, GCP, or Azure, provided the `torchrun` command is configured compatibly.
 
 ## Setting Up
 
 ### Docker
 
-It is recommended to run the scripts with `torchun` in a container defined by the provided Docker image, `./docker/Dockerfile`. In order to build the Docker image and push to AWS ECR run the following:
+We recommend running the scripts with `torchrun` inside a container, defined by the provided Docker image `./docker/Dockerfile`, to ensure consistent dependencies and runtime environments. In order to build the Docker image and push to AWS ECR run the following:
 
 ```bash
 cd ./docker
@@ -23,7 +23,7 @@ sh build_push_image.sh
 
 ### Additional Environment
 
-No call to `torchun` should be performed outside the Docker container. An additional environment may be setup to interface with AWS or to download and pre-process datasets from the Hugging Face Hub before the start of training or inference. Two methods are provided for setting up this additional environment. The additional environment may be set up with a requirements.txt file and the scripts executed in venv:
+No call to `torchun` should be performed outside the Docker container. You can set up an additional environment to interface with AWS or to pre-process datasets from the HuggingFace Hub prior to training or inference. Two methods are provided for setting up this additional environment. The additional environment may be set up with a requirements.txt file and the scripts can be executed in a virtual environment:
 
 ```bash
 python3 -m pip install virtualenv
@@ -35,7 +35,7 @@ bash launch.sh
 deactivate
 ```
 
-The additional environment may also be set up using poetry and the scripts executed in a poetry shell:
+Alternatively, the environment can be set up using Poetry and the scripts can be executed in a Poetry shell:
 
 ```bash
 poetry env use pythonx.x
@@ -48,13 +48,11 @@ exit
 
 ## Dataset Generation
 
-The task scripts ran with `torchun` assume that the train and test datasets are `dataset.Datasets` objects. Processing the raw `dataset.Datasets` object may be performed before calling `torchun` or during script execution if the `processing_function` field is set in the `ScriptArguments` dataclass.
+The task scripts ran with `torchun` assume that the train and test datasets are `dataset.Datasets` objects. Before running a script with `torchun`, you can setup the `dataset.Datasets` objects with the loading script `./src/create_dataset.py` and default datasets `HuggingFaceH4/no_robots` for fine-tuning and `trl-internal-testing/hh-rlhf-helpful-base-trl-style` for RLHF, both hosted on the Hugging Face Hub. 
 
-Example processing functions are included in `./src/scripts/utils.py`. You may modify or add functions here specific to your domain and task. The two example function are `dummy_processing_function` and `dummy_rlhf_processing_function`. 
+Processing of the raw `dataset.Datasets` object may be performed before calling `torchun` or during script execution if the `processing_function` field is set in the `ScriptArguments` dataclass. Example processing functions are included in `./src/scripts/utils/data_processing.py`. You may modify or add functions specific to your domain and task. The two example functions are `dummy_processing_function` and `dummy_rlhf_processing_function`. 
 
-The former is for use in fine-tuning tasks where the dataset is assumed to contain the `message` field of the type `List[Dict[str, str]]` representing a chat exchange with defined role and content k,v pairs alternating between the user and the AI assistant. The latter is for use in RLHF tasks where the dataset is assumed to have fields `prompt`, `rejected`, and `chosen` of types `str`, `List[Dict[str, str]]`, and `List[Dict[str, str]]` respectively with a similar chat exchange format.
-
-Before running a script with `torchun`, you can setup the dataset objects with loading script `create_dataset.py` and default datasets `HuggingFaceH4/no_robots` for fine-tuning and `trl-internal-testing/hh-rlhf-helpful-base-trl-style` for RLHF hosted on the Hugging Face Hub. 
+The first function is designed for fine-tuning tasks. It assumes the dataset contains a message field structured as a list of dictionaries, `List[Dict[str, str]]`, each representing a chat exchange with alternating 'role' and 'content' pairs between the user and AI assistant. The latter is for use in RLHF tasks where the dataset is assumed to have fields `prompt`, `rejected`, and `chosen` of types `str`, `List[Dict[str, str]]`, and `List[Dict[str, str]]` respectively with a similar chat exchange format.
 
 ```bash
 cd ./src
@@ -75,15 +73,14 @@ python create_dataset.py 's3://deepspeed_test_datasets' \
 
 ## Entrypoints
 
-User inputs to the tool are defined by the Python dataclasses `transformers.TrainingArguments` and the custom dataclasses defined in `./scripts/utils/data_args.py`: `SageMakerArguments`, `ScriptArguments`, `InferenceArguments`. The script executed by `torchrun` is defined by the `code_entry_point` field in the `SageMakerArguments`. Scripts include `train.py`, `sft_train.py`, `dpo_train.py`, and `orpo_train.py` for training as well as `inference.py` for inference. Alternatively, the training task may also be defined by using the `unified_train.py` entrypoint with `trainer_type` field set in the `ScriptArguments`. The `ScriptArguments` dataclass contains parameters not already found in `TrainingArguments`. The `InferenceArguments` contains parameters required for generation and inference.
+This tool's inputs are defined using Python dataclasses such as `transformers.TrainingArguments` and custom dataclasses found in `./scripts/utils/data_args.py`: `SageMakerArguments`, `ScriptArguments`, and `InferenceArguments`. The `ScriptArguments` dataclass contains parameters not already found in the `TrainingArguments` dataclass. The `InferenceArguments` dataclass contains parameters required for generation and inference. The script or entrypoint executed by `torchrun` is defined by the `code_entry_point` field in the `SageMakerArguments` dataclass. Scripts include `train.py`, `sft_train.py`, `dpo_train.py`, and `orpo_train.py` for training as well as `inference.py` for inference. The training task can alternatively be defined using the `unified_train.py` entrypoint with the `trainer_type` field set in the `ScriptArguments` dataclass.
 
 ## Tested Configurations
-
-Major functionalities were tested on multi-GPU and multi-node configurations of the SageMaker p4, p5, and g5 instances (A100, H100, and A10 GPUs respectively). The Docker image compiles PyTorch for use with the following architectures: Volta, Turing, Ampere, Ada, and Hopper (excluding Thor).
+Core functionalities have been tested on multi-GPU and multi-node configurations of SageMaker p4, p5, and g5 instances (A100, H100, and A10 GPUs respectively). The Docker image compiles PyTorch for use with the following architectures: Volta, Turing, Ampere, Ada, and Hopper (excluding Thor).
 
 ## Pre-training/Fine-Tuning
 
-All training related tasks can be performed with the `Trainer` class from the transformers library (wrapped in the `train.py` entrypoint). All other trainer classes inherit from this class and wrap custom loss, data processing, or quantization support for a more streamlined user experience. Pre-training or custom tasks that do not have a predefined trainer class will use `Trainer`. In applications where full generation, sampling and all, is required during training for evaluation purposes, move to the `Seq2SeqTrainer` (wrapped in the `train.py` entrypoint) by setting the `predict_with_generate` field in the `ScriptArguments`. In applications where you need to train on instruction data or require some PEFT or quantization support, use the `SFTTrainer` (wrapped in the `sft_train.py` entrypoint). An example shell script to run training is as follows:
+All training related tasks can be performed with the `Trainer` class from the transformers library (wrapped in the `train.py` entrypoint). All other trainer classes inherit from this class and wrap custom loss, data processing, or quantization support for a more streamlined user experience. Pre-training or custom tasks that do not have a predefined trainer class will use `Trainer`. In applications where full generation including sampling is required during training for evaluation purposes, move to the `Seq2SeqTrainer` (wrapped in the `train.py` entrypoint) by setting the `predict_with_generate` field in the `ScriptArguments` dataclass. For applications involving instruction data, parameter efficient fine-tuning (PEFT), or quantization support use the `SFTTrainer` (wrapped in the `sft_train.py` entrypoint). The following is an example shell script for running a training job:
 
 ```bash
 %%bash
@@ -151,7 +148,7 @@ python -u launch.py \
 
 ## RLHF
 
-Currently only the ORPO and DPO algorithms are supported. Support exists for PEFT and quantization which can be used alongside DeepSpeed as seen in the following documentation: https://huggingface.co/docs/peft/accelerate/deepspeed#compatibility-with-bitsandbytes-quantization--lora. An example shell script to run RLHF is:
+This tool supports the Odds Ratio Preference Optimization (ORPO) and Direct Preference Optimization (DPO) algorithms. The following is an example shell script for running RLHF:
 
 ```bash
 %%bash
@@ -227,7 +224,7 @@ python -u launch.py \
 
 ## Inference
 
-Three inference runtimes are supported: accelerate, DeepSpeed-Inference, and ZeRO-Inference. DeepSpeed-Inference generally has the best latency due to the optimized inference engine and custom kernel injection that may be turned on with the `replace_with_kernel_inject` field in the `InferenceArguments`. Use ZeRO-Inference when performing inference with very large models that result in OOM for your hardware setup. As with training, the ZeRO-Inference algorthm utilizes data parallel and partitions the data and the model weights across processes. ZeRO-Inference incurs a communication overhead, especially if CPU offloading is enabled with the `cpu_offload` field in the `InferenceArguments`, but allows for a large batch size.
+Three inference runtimes are supported: accelerate, DeepSpeed-Inference, and ZeRO-Inference. DeepSpeed-Inference generally has the best latency due to the optimized inference engine and custom kernel injection that may be turned on with the `replace_with_kernel_inject` field in the `InferenceArguments` dataclass. Use ZeRO-Inference when performing inference with very large models that result in out of memory errors for your hardware setup. Similar to its application in training, the ZeRO-Inference algorithm uses data parallelism to partition both the data and model weights across processes. ZeRO-Inference may incur higher communication overhead, particularly when CPU offloading is enabled with the `cpu_offload` field in the `InferenceArguments` dataclass. On the other hand, ZeRO-Inference allows for a large batch size. The following is an example shell script for running inference:
 
 ```bash
 %%bash
